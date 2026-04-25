@@ -155,19 +155,21 @@ func (hm *HealthMonitor) MonitorDiskSpace(ctx context.Context, recordingDir stri
 			// Calculate usage in GB
 			usageGB := float64(diskStats.Used) / (1024 * 1024 * 1024)
 			totalGB := float64(diskStats.Total) / (1024 * 1024 * 1024)
+			freeGB := float64(diskStats.Free) / (1024 * 1024 * 1024)
 
 			// Log disk usage statistics (Requirement 4.5)
-			logMsg := fmt.Sprintf("Disk usage check: %.2f GB used of %.2f GB total (%.1f%%) on %s",
-				usageGB, totalGB, diskStats.Percent, diskStats.Path)
+			logMsg := fmt.Sprintf("Disk usage check: %.2f GB used, %.2f GB free of %.2f GB total (%.1f%%) on %s",
+				usageGB, freeGB, totalGB, diskStats.Percent, diskStats.Path)
 
-			// Take action based on thresholds
-			const threshold10GB = 10 * 1024 * 1024 * 1024 // 10 GB in bytes
-			const threshold12GB = 12 * 1024 * 1024 * 1024 // 12 GB in bytes
-			const threshold13GB = 13 * 1024 * 1024 * 1024 // 13 GB in bytes
+			// Take action based on FREE SPACE thresholds (not used space)
+			// GitHub Actions runners typically have ~14 GB free space
+			const threshold3GBFree = 3 * 1024 * 1024 * 1024  // 3 GB free - critical
+			const threshold5GBFree = 5 * 1024 * 1024 * 1024  // 5 GB free - warning
+			const threshold7GBFree = 7 * 1024 * 1024 * 1024  // 7 GB free - alert
 
-			if diskStats.Used >= threshold13GB {
+			if diskStats.Free <= threshold3GBFree {
 				// Critical: Stop oldest recording (Requirement 4.4)
-				logMsg = fmt.Sprintf("🚨 CRITICAL: Disk usage at %.2f GB - stopping oldest recording", usageGB)
+				logMsg = fmt.Sprintf("🚨 CRITICAL: Only %.2f GB free - stopping oldest recording", freeGB)
 				fmt.Println(logMsg)
 				
 				if stopOldestRecordingFunc != nil {
@@ -180,25 +182,25 @@ func (hm *HealthMonitor) MonitorDiskSpace(ctx context.Context, recordingDir stri
 
 				// Send notification (Requirement 4.6)
 				hm.SendNotification("Disk Space Critical - Recording Stopped",
-					fmt.Sprintf("Disk usage reached %.2f GB (threshold: 13 GB). Stopped oldest recording to free space.", usageGB))
+					fmt.Sprintf("Only %.2f GB free (threshold: 3 GB). Stopped oldest recording to free space.", freeGB))
 
-			} else if diskStats.Used >= threshold12GB {
+			} else if diskStats.Free <= threshold5GBFree {
 				// Warning: Pause new recordings (Requirement 4.3)
-				logMsg = fmt.Sprintf("⚠️ WARNING: Disk usage at %.2f GB - pausing new recordings", usageGB)
+				logMsg = fmt.Sprintf("⚠️ WARNING: Only %.2f GB free - pausing new recordings", freeGB)
 				fmt.Println(logMsg)
 
 				// Send notification (Requirement 4.6)
 				hm.SendNotification("Disk Space Warning - Recordings Paused",
-					fmt.Sprintf("Disk usage reached %.2f GB (threshold: 12 GB). New recordings paused until space is freed.", usageGB))
+					fmt.Sprintf("Only %.2f GB free (threshold: 5 GB). New recordings paused until space is freed.", freeGB))
 
-			} else if diskStats.Used >= threshold10GB {
+			} else if diskStats.Free <= threshold7GBFree {
 				// Alert: Trigger immediate upload (Requirement 4.2)
-				logMsg = fmt.Sprintf("⚠️ ALERT: Disk usage at %.2f GB - triggering immediate upload", usageGB)
+				logMsg = fmt.Sprintf("⚠️ ALERT: Only %.2f GB free - triggering immediate upload", freeGB)
 				fmt.Println(logMsg)
 
 				// Send notification (Requirement 4.6)
 				hm.SendNotification("Disk Space Alert - Immediate Upload",
-					fmt.Sprintf("Disk usage reached %.2f GB (threshold: 10 GB). Triggering immediate upload of completed recordings.", usageGB))
+					fmt.Sprintf("Only %.2f GB free (threshold: 7 GB). Triggering immediate upload of completed recordings.", freeGB))
 			} else {
 				// Normal operation - just log the stats
 				fmt.Println(logMsg)
