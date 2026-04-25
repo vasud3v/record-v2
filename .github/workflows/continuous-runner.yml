@@ -147,13 +147,32 @@ jobs:
           EOF
           
           if [ -z "$COOKIES" ]; then
-            echo "⚠️  WARNING: CHATURBATE_COOKIES secret not configured"
-            echo "⚠️  Cloudflare may block requests without valid cookies"
-            echo "⚠️  See README for instructions on obtaining cookies"
+            echo "❌ ERROR: CHATURBATE_COOKIES secret not configured"
+            echo ""
+            echo "To fix this:"
+            echo "1. Go to https://github.com/${{ github.repository }}/settings/secrets/actions"
+            echo "2. Add a new secret named: CHATURBATE_COOKIES"
+            echo "3. Value should be: cf_clearance=YOUR_VALUE"
+            echo ""
+            echo "⚠️  Workflow will continue but Cloudflare WILL block all requests"
           else
             echo "✅ Configured Chaturbate cookies from GitHub Secrets"
             # Show first 50 characters of cookies for verification (don't show full cookies in logs)
             echo "   Cookie preview: ${COOKIES:0:50}..."
+            
+            # Validate cookie format
+            if [[ "$COOKIES" == *"cf_clearance="* ]]; then
+              echo "✅ Cookie contains cf_clearance (Cloudflare bypass)"
+            else
+              echo "⚠️  WARNING: Cookie does not contain cf_clearance"
+              echo "   Cloudflare may block requests without cf_clearance cookie"
+            fi
+            
+            # Check if cookies look like placeholders
+            if [[ "$COOKIES" == *"PASTE"* ]] || [[ "$COOKIES" == *"YOUR_"* ]]; then
+              echo "❌ ERROR: Cookies appear to be placeholder text"
+              echo "   Please replace with actual cookie values from your browser"
+            fi
           fi
           
           echo "Created settings.json with Cloudflare bypass configuration"
