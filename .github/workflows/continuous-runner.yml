@@ -139,12 +139,23 @@ jobs:
           # Use cookies from GitHub Secrets if available, otherwise use empty string
           COOKIES="${CHATURBATE_COOKIES:-}"
           
-          cat > ./conf/settings.json << EOF
-          {
-            "cookies": "${COOKIES}",
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-          }
-          EOF
+          # Escape special characters in cookies for JSON
+          # Replace backslashes, quotes, and other special characters
+          COOKIES_ESCAPED=$(echo "$COOKIES" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+          
+          # Use jq to create properly formatted JSON (handles escaping automatically)
+          jq -n \
+            --arg cookies "$COOKIES" \
+            --arg ua "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
+            '{
+              "cookies": $cookies,
+              "user_agent": $ua,
+              "cf_channel_threshold": 5,
+              "cf_global_threshold": 3,
+              "notify_cooldown_hours": 4,
+              "disk_warning_percent": 80,
+              "disk_critical_percent": 90
+            }' > ./conf/settings.json
           
           if [ -z "$COOKIES" ]; then
             echo "❌ ERROR: CHATURBATE_COOKIES secret not configured"
@@ -172,6 +183,24 @@ jobs:
             if [[ "$COOKIES" == *"PASTE"* ]] || [[ "$COOKIES" == *"YOUR_"* ]]; then
               echo "❌ ERROR: Cookies appear to be placeholder text"
               echo "   Please replace with actual cookie values from your browser"
+            fi
+            
+            # Validate that settings.json was created correctly
+            if jq empty ./conf/settings.json 2>/dev/null; then
+              echo "✅ settings.json created successfully with valid JSON format"
+              # Verify cookies were written correctly
+              WRITTEN_COOKIES=$(jq -r '.cookies' ./conf/settings.json)
+              if [ "$WRITTEN_COOKIES" = "$COOKIES" ]; then
+                echo "✅ Cookies verified in settings.json"
+              else
+                echo "❌ ERROR: Cookies mismatch in settings.json"
+                echo "   Expected length: ${#COOKIES}"
+                echo "   Written length: ${#WRITTEN_COOKIES}"
+              fi
+            else
+              echo "❌ ERROR: settings.json contains invalid JSON"
+              cat ./conf/settings.json
+              exit 1
             fi
           fi
           
