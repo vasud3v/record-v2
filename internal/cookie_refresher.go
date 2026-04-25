@@ -96,7 +96,7 @@ func (f *FlareSolverrClient) GetWithCookiesAndUA(ctx context.Context, url string
 	reqData := FlareSolverrRequest{
 		Cmd:        "request.get",
 		URL:        url,
-		MaxTimeout: 60000, // 60 seconds
+		MaxTimeout: 120000, // 120 seconds (2 minutes) for Cloudflare challenge
 		Cookies:    flareCookies,
 		Headers:    headers,
 	}
