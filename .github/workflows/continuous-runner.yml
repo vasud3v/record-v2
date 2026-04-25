@@ -9,9 +9,10 @@ on:
         type: string
         default: ''
       channels:
-        description: 'Comma-separated list of channels to record (format: site:username)'
-        required: true
+        description: 'Comma-separated list of channels to record (or leave empty to use channels.txt)'
+        required: false
         type: string
+        default: ''
       matrix_job_count:
         description: 'Number of parallel matrix jobs (1-20)'
         required: false
@@ -30,6 +31,7 @@ jobs:
     outputs:
       matrix_jobs: ${{ steps.generate_matrix.outputs.matrix_jobs }}
       session_id: ${{ steps.generate_session.outputs.session_id }}
+      channels: ${{ steps.validate.outputs.resolved_channels }}
     steps:
       - name: Validate inputs
         id: validate
@@ -54,14 +56,24 @@ jobs:
             echo "Cost-saving mode ENABLED: 10-minute polling, max 2 concurrent channels"
           fi
           
-          # Validate channels input is not empty
-          if [ -z "${{ inputs.channels }}" ]; then
-            echo "Error: channels input cannot be empty"
+          # Validate channels input or read from channels.txt
+          CHANNELS_LIST="${{ inputs.channels }}"
+          if [ -z "$CHANNELS_LIST" ]; then
+            if [ -f "channels.txt" ]; then
+              echo "Reading channels from channels.txt..."
+              # Read non-empty lines that don't start with # and join with commas
+              CHANNELS_LIST=$(grep -v '^[[:space:]]*#' channels.txt | grep -v '^[[:space:]]*$' | tr -d '\r' | paste -sd "," -)
+            fi
+          fi
+          
+          if [ -z "$CHANNELS_LIST" ]; then
+            echo "Error: No channels provided via input or channels.txt"
             exit 1
           fi
           
-          echo "Validation passed: $MATRIX_COUNT matrix jobs for channels: ${{ inputs.channels }}"
+          echo "Validation passed: $MATRIX_COUNT matrix jobs for channels: $CHANNELS_LIST"
           echo "validated_matrix_count=$MATRIX_COUNT" >> $GITHUB_OUTPUT
+          echo "resolved_channels=$CHANNELS_LIST" >> $GITHUB_OUTPUT
       
       - name: Generate session ID
         id: generate_session
@@ -170,7 +182,7 @@ jobs:
           MATRIX_JOB_ID: ${{ matrix.job_id }}
           MATRIX_JOB_COUNT: ${{ steps.validate.outputs.validated_matrix_count }}
           SESSION_ID: ${{ needs.validate.outputs.session_id }}
-          CHANNELS: ${{ inputs.channels }}
+          CHANNELS: ${{ needs.validate.outputs.channels }}
           SESSION_STATE: ${{ inputs.session_state }}
           COST_SAVING: ${{ inputs.cost_saving }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -261,7 +273,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Session ID:** ${{ needs.validate.outputs.session_id }}" >> $GITHUB_STEP_SUMMARY
           echo "**Matrix Jobs:** ${{ steps.validate.outputs.validated_matrix_count }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Channels:** ${{ inputs.channels }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Channels:** ${{ needs.validate.outputs.channels }}" >> $GITHUB_STEP_SUMMARY
           echo "**Cost-Saving Mode:** ${{ inputs.cost_saving }}" >> $GITHUB_STEP_SUMMARY
           echo "**Status:** ${{ needs.record.result }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
