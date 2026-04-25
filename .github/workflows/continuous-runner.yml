@@ -91,6 +91,7 @@ jobs:
       - name: Restore shared configuration cache
         uses: actions/cache/restore@v4
         id: restore_shared_config
+        continue-on-error: true  # Don't fail if cache restore fails
         env:
           ZSTD_CLEVEL: 19  # Maximum compression level for zstd (1-19)
         with:
@@ -103,6 +104,7 @@ jobs:
       - name: Restore job-specific state cache
         uses: actions/cache/restore@v4
         id: restore_job_state
+        continue-on-error: true  # Don't fail if cache restore fails
         env:
           ZSTD_CLEVEL: 19  # Maximum compression level for zstd (1-19)
         with:
@@ -173,6 +175,7 @@ jobs:
       - name: Save shared configuration cache
         if: always()
         uses: actions/cache/save@v4
+        continue-on-error: true  # Don't fail if cache save fails
         env:
           ZSTD_CLEVEL: 19  # Maximum compression level for zstd (1-19)
         with:
@@ -183,6 +186,7 @@ jobs:
       - name: Save job-specific state cache
         if: always()
         uses: actions/cache/save@v4
+        continue-on-error: true  # Don't fail if cache save fails
         env:
           ZSTD_CLEVEL: 19  # Maximum compression level for zstd (1-19)
         with:

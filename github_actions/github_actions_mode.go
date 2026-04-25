@@ -562,13 +562,19 @@ func (gam *GitHubActionsMode) CreateChannelConfigWithQuality(username, site stri
 func (gam *GitHubActionsMode) GetAssignedChannel() (string, error) {
 	// In the matrix strategy, each job gets one channel
 	// The matrix job ID determines which channel this job handles
-	// For now, we'll use a simple approach: parse the job ID to get the index
+	// Matrix job IDs can be in format "matrix-job-N" or just "N" where N is 1-indexed
 	
-	// Matrix job IDs are in format "matrix-job-N" where N is 1-indexed
 	var jobIndex int
-	_, err := fmt.Sscanf(gam.MatrixJobID, "matrix-job-%d", &jobIndex)
+	var err error
+	
+	// Try parsing as "matrix-job-N" format first
+	_, err = fmt.Sscanf(gam.MatrixJobID, "matrix-job-%d", &jobIndex)
 	if err != nil {
-		return "", fmt.Errorf("invalid matrix job ID format: %s", gam.MatrixJobID)
+		// If that fails, try parsing as just a number
+		_, err = fmt.Sscanf(gam.MatrixJobID, "%d", &jobIndex)
+		if err != nil {
+			return "", fmt.Errorf("invalid matrix job ID format: %s (expected 'matrix-job-N' or 'N')", gam.MatrixJobID)
+		}
 	}
 	
 	// Convert to 0-indexed

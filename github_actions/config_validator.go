@@ -34,8 +34,8 @@ func (vr *ValidationResult) AddError(err string) {
 // It checks:
 // - Channels list is not empty
 // - Matrix job count is between 1 and 20
-// - Gofile API key is present
-// - Filester API key is present
+// - Gofile API key is present (warning only, not required)
+// - Filester API key is present (warning only, not required)
 // - Polling interval is positive (when implemented)
 //
 // Returns a ValidationResult with any errors found.
@@ -60,17 +60,8 @@ func (cv *ConfigValidator) ValidateWorkflowInputs(channels []string, matrixJobCo
 		result.AddError(fmt.Sprintf("matrix_job_count cannot exceed 20 (GitHub Actions limit), got %d", matrixJobCount))
 	}
 
-	// Validate Gofile API key is present
-	gofileAPIKey := os.Getenv("GOFILE_API_KEY")
-	if gofileAPIKey == "" {
-		result.AddError("GOFILE_API_KEY environment variable is required")
-	}
-
-	// Validate Filester API key is present
-	filesterAPIKey := os.Getenv("FILESTER_API_KEY")
-	if filesterAPIKey == "" {
-		result.AddError("FILESTER_API_KEY environment variable is required")
-	}
+	// Note: API keys are now optional - warnings are logged during initialization
+	// Recordings will work locally even without upload capabilities
 
 	// Note: Polling interval validation will be added when polling interval
 	// is implemented as a workflow input (Requirement 5.5)
@@ -80,6 +71,7 @@ func (cv *ConfigValidator) ValidateWorkflowInputs(channels []string, matrixJobCo
 
 // ValidateEnvironmentVariables validates that all required environment variables are present.
 // This is a helper method that can be called early in the workflow to fail fast.
+// Note: API keys (GOFILE_API_KEY, FILESTER_API_KEY) are now optional.
 //
 // Requirements: 5.9, 5.11
 func (cv *ConfigValidator) ValidateEnvironmentVariables() *ValidationResult {
@@ -88,12 +80,10 @@ func (cv *ConfigValidator) ValidateEnvironmentVariables() *ValidationResult {
 		Errors: []string{},
 	}
 
-	// Check required environment variables
+	// Check required environment variables (only GitHub-related ones are truly required)
 	requiredEnvVars := map[string]string{
 		"GITHUB_TOKEN":      "GitHub API authentication token",
 		"GITHUB_REPOSITORY": "GitHub repository identifier",
-		"GOFILE_API_KEY":    "Gofile upload API key",
-		"FILESTER_API_KEY":  "Filester upload API key",
 	}
 
 	for envVar, description := range requiredEnvVars {
@@ -101,6 +91,9 @@ func (cv *ConfigValidator) ValidateEnvironmentVariables() *ValidationResult {
 			result.AddError(fmt.Sprintf("%s environment variable is required (%s)", envVar, description))
 		}
 	}
+	
+	// Note: GOFILE_API_KEY and FILESTER_API_KEY are now optional
+	// Warnings are logged during initialization if they're missing
 
 	return result
 }
