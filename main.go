@@ -9,6 +9,7 @@ import (
 
 	"github.com/HeapOfChaos/goondvr/config"
 	"github.com/HeapOfChaos/goondvr/entity"
+	"github.com/HeapOfChaos/goondvr/github_actions"
 	"github.com/HeapOfChaos/goondvr/manager"
 	"github.com/HeapOfChaos/goondvr/router"
 	"github.com/HeapOfChaos/goondvr/server"
@@ -142,11 +143,45 @@ func main() {
 				Value: "",
 			},
 		},
-		Action: start,
+		Action: func(c *cli.Context) error {
+			// Check if running in GitHub Actions mode
+			if c.String("mode") == "github-actions" {
+				return startGitHubActionsMode(c)
+			}
+			// Otherwise run normal mode
+			return start(c)
+		},
 	}
+	
+	// Add GitHub Actions mode flags
+	github_actions.AddGitHubActionsModeFlags(app)
+	
 	if err := app.Run(os.Args); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// startGitHubActionsMode handles the GitHub Actions continuous runner mode
+func startGitHubActionsMode(c *cli.Context) error {
+	fmt.Println(logo)
+	fmt.Println("\n🚀 Starting GitHub Actions Continuous Runner Mode\n")
+	
+	// Parse and validate GitHub Actions mode configuration
+	gam, err := github_actions.ParseGitHubActionsModeConfig(c)
+	if err != nil {
+		return fmt.Errorf("failed to parse GitHub Actions mode config: %w", err)
+	}
+	
+	// Start the workflow lifecycle
+	configDir := "./conf"
+	recordingsDir := "./videos"
+	
+	if err := gam.StartWorkflowLifecycle(configDir, recordingsDir); err != nil {
+		return fmt.Errorf("failed to start workflow lifecycle: %w", err)
+	}
+	
+	// Keep the process running
+	select {}
 }
 
 func start(c *cli.Context) error {
