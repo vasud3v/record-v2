@@ -31,11 +31,12 @@ func RefreshCookiesWithFlareSolverr(ctx context.Context) error {
 	// Visit Chaturbate homepage to get fresh cf_clearance cookie
 	chaturbateURL := strings.TrimSuffix(server.Config.Domain, "/")
 	
-	// Prepare headers - use a standard Chrome User-Agent
-	// FlareSolverr will use its own User-Agent from the real Chrome browser
+	// Prepare headers - CRITICAL: Add X-Requested-With to bypass age gate
+	// This is the key insight from https://gist.github.com/you-cant-see-me/811ab5f9461b7aa0d69f59db7eed98ec
 	headers := make(map[string]string)
 	headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
 	headers["Accept-Language"] = "en-US,en;q=0.5"
+	headers["X-Requested-With"] = "XMLHttpRequest" // CRITICAL: Bypass age gate
 
 	// Step 1: Visit homepage to get initial cookies and solve Cloudflare
 	log.Printf("   Step 1: Visiting %s through FlareSolverr...", chaturbateURL)
@@ -44,20 +45,21 @@ func RefreshCookiesWithFlareSolverr(ctx context.Context) error {
 		return fmt.Errorf("flaresolverr homepage request failed: %w", err)
 	}
 
-	// Step 2: Visit age verification endpoint to accept age gate
-	// Chaturbate uses /auth/age_verify/ endpoint to set age verification cookie
-	ageVerifyURL := chaturbateURL + "/auth/age_verify/"
-	log.Printf("   Step 2: Accepting age verification at %s...", ageVerifyURL)
-	_, cookies2, _, err := flare.GetWithCookiesAndUA(ctx, ageVerifyURL, cookies, headers)
+	// Step 2: Visit a public room page to establish a proper session
+	// This ensures we get all necessary session cookies
+	// Using a known public room to trigger session creation
+	testRoomURL := chaturbateURL + "/tester/"
+	log.Printf("   Step 2: Establishing session by visiting test room...")
+	_, cookies2, _, err := flare.GetWithCookiesAndUA(ctx, testRoomURL, cookies, headers)
 	if err != nil {
-		// Age verify might fail, but we can continue with cookies from step 1
-		log.Printf("   Warning: Age verification request failed (continuing): %v", err)
+		// Room visit might fail, but we can continue with cookies from step 1
+		log.Printf("   Warning: Room visit failed (continuing): %v", err)
 	} else {
 		// Merge cookies from both requests
 		for name, value := range cookies2 {
 			cookies[name] = value
 		}
-		log.Println("   ✅ Age verification accepted")
+		log.Println("   ✅ Session established")
 	}
 
 	// Extract cf_clearance cookie

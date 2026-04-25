@@ -245,6 +245,11 @@ func (h *Req) DoRequest(req *http.Request) (string, error) {
 
 // SetRequestHeaders applies necessary headers to the request.
 func (h *Req) SetRequestHeaders(req *http.Request) {
+	// CRITICAL: Always add X-Requested-With header to bypass age gate
+	// This is the key to bypassing Chaturbate's age verification
+	// Source: https://gist.github.com/you-cant-see-me/811ab5f9461b7aa0d69f59db7eed98ec
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	
 	if h.isMedia {
 		ref := h.referer
 		if ref == "" {
@@ -252,11 +257,8 @@ func (h *Req) SetRequestHeaders(req *http.Request) {
 		}
 		req.Header.Set("Referer", ref)
 		req.Header.Set("Origin", strings.TrimRight(ref, "/"))
-	} else {
-		// X-Requested-With helps bypass Cloudflare on chaturbate.com page fetches.
-		// Do NOT send it to CDN media hosts (mmcdn.com) as it may cause rejection.
-		req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	}
+	
 	if server.Config.UserAgent != "" {
 		req.Header.Set("User-Agent", server.Config.UserAgent)
 	}
@@ -293,6 +295,11 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 	// Build headers map
 	headers := make(map[string]string)
 	
+	// CRITICAL: Always add X-Requested-With header to bypass age gate
+	// This is the key to bypassing Chaturbate's age verification
+	// Source: https://gist.github.com/you-cant-see-me/811ab5f9461b7aa0d69f59db7eed98ec
+	headers["X-Requested-With"] = "XMLHttpRequest"
+	
 	if h.isMedia {
 		ref := h.referer
 		if ref == "" {
@@ -300,8 +307,6 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 		}
 		headers["Referer"] = ref
 		headers["Origin"] = strings.TrimRight(ref, "/")
-	} else {
-		headers["X-Requested-With"] = "XMLHttpRequest"
 	}
 	
 	if server.Config.UserAgent != "" {
@@ -322,6 +327,7 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 				preview = preview[:100] + "..."
 			}
 			fmt.Printf("[DEBUG] CycleTLS cookies: %s\n", preview)
+			fmt.Printf("[DEBUG] CycleTLS X-Requested-With: %s\n", headers["X-Requested-With"])
 		}
 	}
 	
