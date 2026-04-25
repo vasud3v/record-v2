@@ -12,6 +12,9 @@ jobs:
       session_id: ${{ steps.generate_session.outputs.session_id }}
       channels: ${{ steps.validate.outputs.resolved_channels }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
       - name: Validate inputs
         id: validate
         run: |
