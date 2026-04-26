@@ -15,6 +15,10 @@ import (
 // This handler is designed to be called from the channel's finalizeRecording
 // method after the recording file has been finalized (remuxed/transcoded).
 //
+// IMPORTANT: Supabase is REQUIRED. The handler will fail if supabaseManager is nil
+// or if the Supabase insert operation fails. This ensures all recordings are properly
+// stored in the centralized database.
+//
 // Requirements: 3.1, 3.7, 6.7, 14.1, 15.3
 type RecordingCompletionHandler struct {
 	storageUploader *StorageUploader
@@ -26,6 +30,8 @@ type RecordingCompletionHandler struct {
 }
 
 // NewRecordingCompletionHandler creates a new handler for recording completion events.
+// All parameters are required, including supabaseManager. Returns nil if any required
+// parameter is nil.
 func NewRecordingCompletionHandler(
 	storageUploader *StorageUploader,
 	databaseManager *DatabaseManager,
@@ -34,6 +40,32 @@ func NewRecordingCompletionHandler(
 	sessionID string,
 	matrixJobID string,
 ) *RecordingCompletionHandler {
+	// Validate required parameters
+	if storageUploader == nil {
+		log.Printf("[NewRecordingCompletionHandler] ERROR: storageUploader is nil")
+		return nil
+	}
+	if databaseManager == nil {
+		log.Printf("[NewRecordingCompletionHandler] ERROR: databaseManager is nil")
+		return nil
+	}
+	if supabaseManager == nil {
+		log.Printf("[NewRecordingCompletionHandler] ERROR: supabaseManager is nil - Supabase is REQUIRED")
+		return nil
+	}
+	if healthMonitor == nil {
+		log.Printf("[NewRecordingCompletionHandler] ERROR: healthMonitor is nil")
+		return nil
+	}
+	if sessionID == "" {
+		log.Printf("[NewRecordingCompletionHandler] ERROR: sessionID is empty")
+		return nil
+	}
+	if matrixJobID == "" {
+		log.Printf("[NewRecordingCompletionHandler] ERROR: matrixJobID is empty")
+		return nil
+	}
+	
 	return &RecordingCompletionHandler{
 		storageUploader: storageUploader,
 		databaseManager: databaseManager,
@@ -178,44 +210,76 @@ func (rch *RecordingCompletionHandler) HandleRecordingCompletion(
 		log.Printf("[RecordingCompletionHandler] Recording added to database successfully")
 	}
 
-	// Step 4.5: Add recording to Supabase (if configured)
-	if rch.supabaseManager != nil {
-		log.Printf("[RecordingCompletionHandler] Adding recording to Supabase...")
+	// Step 4.5: Add recording to Supabase (REQUIRED)
+	if rch.supabaseManager == nil {
+		err := fmt.Errorf("Supabase manager not configured - Supabase storage is required")
+		log.Printf("[RecordingCompletionHandler] CRITICAL ERROR: %v", err)
 		
-		supabaseRecording := SupabaseRecording{
-			Site:           site,
-			Channel:        channel,
-			Timestamp:      startTime,
-			Date:           date,
-			DurationSec:    int(duration),
-			FileSizeBytes:  fileSizeBytes,
-			Quality:        quality,
-			GofileURL:      uploadResult.GofileURL,
-			FilesterURL:    uploadResult.FilesterURL,
-			FilesterChunks: uploadResult.FilesterChunks,
-			SessionID:      rch.sessionID,
-			MatrixJob:      rch.matrixJobID,
+		// Send notification about missing Supabase configuration
+		notificationErr := rch.healthMonitor.SendNotification(
+			"Supabase Configuration Missing",
+			fmt.Sprintf("CRITICAL: Supabase manager not configured for channel %s. Recording uploaded but cannot be stored in database. This is a configuration error.", channel),
+		)
+		if notificationErr != nil {
+			log.Printf("[RecordingCompletionHandler] Failed to send Supabase configuration error notification: %v", notificationErr)
 		}
 		
-		insertedRecord, err := rch.supabaseManager.InsertRecording(supabaseRecording)
-		if err != nil {
-			log.Printf("[RecordingCompletionHandler] Failed to add recording to Supabase: %v", err)
-			
-			// Send notification about Supabase failure
-			notificationErr := rch.healthMonitor.SendNotification(
-				"Supabase Update Failed",
-				fmt.Sprintf("Failed to add recording metadata to Supabase for channel %s: %v. Recording is uploaded and in JSON database.", channel, err),
-			)
-			if notificationErr != nil {
-				log.Printf("[RecordingCompletionHandler] Failed to send Supabase failure notification: %v", notificationErr)
-			}
-			
-			// Continue even if Supabase insert fails - JSON database is primary
-		} else {
-			log.Printf("[RecordingCompletionHandler] Recording added to Supabase successfully (ID: %s)", insertedRecord.ID)
+		return err
+	}
+	
+	log.Printf("[RecordingCompletionHandler] Adding recording to Supabase...")
+	
+	supabaseRecording := SupabaseRecording{
+		Site:           site,
+		Channel:        channel,
+		Timestamp:      startTime,
+		Date:           date,
+		DurationSec:    int(duration),
+		FileSizeBytes:  fileSizeBytes,
+		Quality:        quality,
+		GofileURL:      uploadResult.GofileURL,
+		FilesterURL:    uploadResult.FilesterURL,
+		FilesterChunks: uploadResult.FilesterChunks,
+		SessionID:      rch.sessionID,
+		MatrixJob:      rch.matrixJobID,
+	}
+	
+	insertedRecord, err := rch.supabaseManager.InsertRecording(supabaseRecording)
+	if err != nil {
+		log.Printf("[RecordingCompletionHandler] CRITICAL ERROR: Failed to add recording to Supabase: %v", err)
+		
+		// Send notification about Supabase failure
+		notificationErr := rch.healthMonitor.SendNotification(
+			"Supabase Update Failed - CRITICAL",
+			fmt.Sprintf("CRITICAL: Failed to add recording metadata to Supabase for channel %s: %v. Recording is uploaded but not stored in database.", channel, err),
+		)
+		if notificationErr != nil {
+			log.Printf("[RecordingCompletionHandler] Failed to send Supabase failure notification: %v", notificationErr)
 		}
-	} else {
-		log.Printf("[RecordingCompletionHandler] Supabase not configured, skipping Supabase insert")
+		
+		// Fail the operation if Supabase insert fails - this is now required
+		// DO NOT delete the file - it needs to be preserved for retry/artifacts
+		log.Printf("[RecordingCompletionHandler] Local file preserved due to Supabase failure: %s", filePath)
+		return fmt.Errorf("failed to store recording in Supabase: %w", err)
+	}
+	
+	log.Printf("[RecordingCompletionHandler] Recording added to Supabase successfully (ID: %s)", insertedRecord.ID)
+	
+	// Step 4.6: Validate URLs in Supabase record (BUG 6 FIX)
+	if insertedRecord.GofileURL == "" || insertedRecord.FilesterURL == "" {
+		err := fmt.Errorf("Supabase record has empty URLs - Gofile: %q, Filester: %q", insertedRecord.GofileURL, insertedRecord.FilesterURL)
+		log.Printf("[RecordingCompletionHandler] CRITICAL ERROR: %v", err)
+		
+		// Send notification
+		notificationErr := rch.healthMonitor.SendNotification(
+			"Supabase Data Integrity Error - CRITICAL",
+			fmt.Sprintf("CRITICAL: Supabase record for channel %s has empty URLs. This indicates a data integrity issue.", channel),
+		)
+		if notificationErr != nil {
+			log.Printf("[RecordingCompletionHandler] Failed to send data integrity notification: %v", notificationErr)
+		}
+		
+		return err
 	}
 
 	// Step 5: Send notification via Health Monitor (Requirement 6.7)
@@ -241,23 +305,22 @@ func (rch *RecordingCompletionHandler) HandleRecordingCompletion(
 		log.Printf("[RecordingCompletionHandler] Completion notification sent successfully")
 	}
 
-	// Step 6: Delete local file after successful upload (Requirement 3.7)
-	// Note: The StorageUploader.UploadRecording method already deletes the file
-	// after successful dual upload, so we only need to verify it was deleted
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		log.Printf("[RecordingCompletionHandler] Local file deleted successfully: %s", filePath)
-	} else if err == nil {
-		// File still exists - this shouldn't happen if upload succeeded
-		log.Printf("[RecordingCompletionHandler] WARNING: Local file still exists after upload: %s", filePath)
-		log.Printf("[RecordingCompletionHandler] Attempting to delete local file...")
-		if err := os.Remove(filePath); err != nil {
-			log.Printf("[RecordingCompletionHandler] Failed to delete local file: %v", err)
-			// Don't fail the operation - file is uploaded and indexed
-		} else {
-			log.Printf("[RecordingCompletionHandler] Local file deleted successfully")
+	// Step 6: Delete local file AFTER successful upload AND Supabase insert (BUG 3 FIX)
+	// This ensures we don't lose the file if Supabase insert fails
+	log.Printf("[RecordingCompletionHandler] Deleting local file after successful upload and database insert: %s", filePath)
+	if err := os.Remove(filePath); err != nil {
+		log.Printf("[RecordingCompletionHandler] WARNING: Failed to delete local file: %v", err)
+		// Send notification about cleanup failure
+		notificationErr := rch.healthMonitor.SendNotification(
+			"File Cleanup Failed",
+			fmt.Sprintf("Failed to delete local file %s after successful upload: %v. Manual cleanup may be required.", filePath, err),
+		)
+		if notificationErr != nil {
+			log.Printf("[RecordingCompletionHandler] Failed to send cleanup failure notification: %v", notificationErr)
 		}
+		// Don't fail the operation - recording is safely uploaded and stored
 	} else {
-		log.Printf("[RecordingCompletionHandler] Error checking file status: %v", err)
+		log.Printf("[RecordingCompletionHandler] Local file deleted successfully: %s", filePath)
 	}
 
 	log.Printf("[RecordingCompletionHandler] Recording completion handling finished successfully")

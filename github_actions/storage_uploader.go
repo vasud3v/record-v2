@@ -66,7 +66,19 @@ type gofileUploadResponse struct {
 
 // NewStorageUploader creates a new StorageUploader instance with the provided API keys.
 // The httpClient is configured with a 5-minute timeout to handle large file uploads.
+// 
+// BUG 5 FIX: Validates that API keys are not empty. Returns nil if either key is empty.
 func NewStorageUploader(gofileAPIKey, filesterAPIKey string) *StorageUploader {
+	// Validate API keys are not empty (BUG 5 FIX)
+	if gofileAPIKey == "" {
+		log.Printf("ERROR: Gofile API key is empty - cannot create StorageUploader")
+		return nil
+	}
+	if filesterAPIKey == "" {
+		log.Printf("ERROR: Filester API key is empty - cannot create StorageUploader")
+		return nil
+	}
+	
 	return &StorageUploader{
 		gofileAPIKey:   gofileAPIKey,
 		filesterAPIKey: filesterAPIKey,
@@ -639,41 +651,50 @@ func (su *StorageUploader) CalculateFileChecksum(filePath string) (string, error
 // It executes both uploads concurrently using goroutines, waits for both to complete,
 // and returns a combined UploadResult with URLs from both services.
 //
+// CRITICAL: BOTH uploads must succeed. If either Gofile or Filester upload fails,
+// the entire operation is considered failed and falls back to GitHub Artifacts.
+// This ensures redundancy - recordings are always available from two independent
+// storage providers.
+//
 // The method implements retry logic with exponential backoff for each upload service
-// independently. If both uploads fail after retries, it falls back to GitHub Artifacts.
+// independently. If either upload fails after retries, it falls back to GitHub Artifacts.
 //
 // The method first calculates the SHA-256 checksum of the file before upload for
 // integrity verification. It then retrieves the optimal Gofile server and launches
 // two goroutines to upload to Gofile and Filester simultaneously. It waits for both
 // uploads to complete before returning the combined result.
 //
-// If either upload fails, the method still returns the successful URL(s) and marks
-// Success as true if at least one upload succeeded. The Error field will contain
-// details about any failures.
+// If either upload fails, the method returns an error and marks Success as false.
+// The Error field will contain details about which upload(s) failed.
 //
-// If both uploads fail after retries, the method automatically falls back to uploading
+// If either upload fails after retries, the method automatically falls back to uploading
 // the file to GitHub Artifacts as a last resort.
 //
 // Requirements: 3.8, 3.11, 14.1, 14.10, 14.11, 14.12
 func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string) (*UploadResult, error) {
 	log.Printf("Starting parallel upload of %s to Gofile and Filester with retry logic", filePath)
 
-	// Calculate file checksum before upload for integrity verification (Requirement 3.11)
-	checksum, err := su.CalculateFileChecksum(filePath)
-	if err != nil {
-		log.Printf("Warning: Failed to calculate file checksum: %v", err)
-		// Continue with upload even if checksum calculation fails
-		checksum = ""
-	} else {
-		log.Printf("Calculated file checksum: %s (SHA-256)", checksum)
-	}
-
-	// Get file info for logging
+	// Validate file exists and get info
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat file: %w", err)
 	}
-	log.Printf("File size: %d bytes, checksum: %s", fileInfo.Size(), checksum)
+	
+	// Validate minimum file size (BUG 10 FIX)
+	const minFileSize = 1024 // 1 KB minimum
+	if fileInfo.Size() < minFileSize {
+		return nil, fmt.Errorf("file too small (%d bytes) - minimum %d bytes required", fileInfo.Size(), minFileSize)
+	}
+	
+	log.Printf("File size: %d bytes", fileInfo.Size())
+
+	// Calculate file checksum before upload for integrity verification (Requirement 3.11)
+	checksum, err := su.CalculateFileChecksum(filePath)
+	if err != nil {
+		// Make checksum calculation mandatory (BUG 8 FIX)
+		return nil, fmt.Errorf("failed to calculate file checksum (required for integrity): %w", err)
+	}
+	log.Printf("Calculated file checksum: %s (SHA-256)", checksum)
 
 	// Get Gofile server first (needed for upload) - skip if API key not configured
 	server := ""
@@ -702,6 +723,24 @@ func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string)
 
 	// Launch Gofile upload goroutine with retry logic
 	go func() {
+		// Recover from panics to prevent deadlock (BUG 11 FIX)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC in Gofile upload goroutine: %v", r)
+				gofileChan <- uploadResponse{
+					service: "Gofile",
+					err:     fmt.Errorf("goroutine panicked: %v", r),
+				}
+			}
+		}()
+		
+		// Check context before starting (BUG 2 FIX)
+		if ctx.Err() != nil {
+			log.Printf("Context cancelled before Gofile upload started")
+			gofileChan <- uploadResponse{service: "Gofile", err: ctx.Err()}
+			return
+		}
+		
 		if su.gofileAPIKey == "" {
 			log.Printf("Skipping Gofile upload - API key not configured")
 			gofileChan <- uploadResponse{service: "Gofile", err: fmt.Errorf("Gofile API key not configured")}
@@ -724,6 +763,24 @@ func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string)
 
 	// Launch Filester upload goroutine with retry logic
 	go func() {
+		// Recover from panics to prevent deadlock (BUG 11 FIX)
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC in Filester upload goroutine: %v", r)
+				filesterChan <- uploadResponse{
+					service: "Filester",
+					err:     fmt.Errorf("goroutine panicked: %v", r),
+				}
+			}
+		}()
+		
+		// Check context before starting (BUG 2 FIX)
+		if ctx.Err() != nil {
+			log.Printf("Context cancelled before Filester upload started")
+			filesterChan <- uploadResponse{service: "Filester", err: ctx.Err()}
+			return
+		}
+		
 		if su.filesterAPIKey == "" {
 			log.Printf("Skipping Filester upload - API key not configured")
 			filesterChan <- uploadResponse{service: "Filester", err: fmt.Errorf("Filester API key not configured")}
@@ -754,26 +811,25 @@ func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string)
 		Error:          nil,
 	}
 
-	// Check if at least one upload succeeded
+	// Check if BOTH uploads succeeded - BOTH are required
 	gofileSuccess := gofileResp.err == nil && gofileResp.url != ""
 	filesterSuccess := filesterResp.err == nil && filesterResp.url != ""
 
-	if gofileSuccess || filesterSuccess {
-		result.Success = true
-		log.Printf("Upload completed successfully - Gofile: %v, Filester: %v", gofileSuccess, filesterSuccess)
-		
-		// Log integrity verification results (Requirement 3.11)
-		if checksum != "" {
-			log.Printf("Upload integrity verification - File checksum: %s", checksum)
-			log.Printf("Note: Gofile and Filester APIs do not provide checksums in responses for verification")
-			log.Printf("Local file checksum logged for manual verification if needed")
+	// BOTH uploads must succeed - fail if either one fails
+	if !gofileSuccess || !filesterSuccess {
+		// Build detailed error message
+		var errorMsg string
+		if !gofileSuccess && !filesterSuccess {
+			errorMsg = fmt.Sprintf("BOTH uploads failed - Gofile: %v, Filester: %v", gofileResp.err, filesterResp.err)
+		} else if !gofileSuccess {
+			errorMsg = fmt.Sprintf("Gofile upload failed: %v (Filester succeeded)", gofileResp.err)
+		} else {
+			errorMsg = fmt.Sprintf("Filester upload failed: %v (Gofile succeeded)", filesterResp.err)
 		}
-	}
-
-	// Combine errors if both failed
-	if !gofileSuccess && !filesterSuccess {
-		result.Error = fmt.Errorf("both uploads failed - Gofile: %v, Filester: %v", gofileResp.err, filesterResp.err)
-		log.Printf("Both uploads failed after retries: %v", result.Error)
+		
+		result.Error = fmt.Errorf(errorMsg)
+		result.Success = false
+		log.Printf("CRITICAL: Dual upload requirement not met - %s", errorMsg)
 		
 		// Fall back to GitHub Artifacts (Requirement 8.3)
 		log.Printf("Falling back to GitHub Artifacts for %s", filePath)
@@ -789,34 +845,42 @@ func (su *StorageUploader) UploadRecording(ctx context.Context, filePath string)
 		return result, result.Error
 	}
 
-	// Log partial failures
-	if !gofileSuccess {
-		log.Printf("Gofile upload failed: %v", gofileResp.err)
-		result.Error = fmt.Errorf("Gofile upload failed: %w", gofileResp.err)
+	// Both uploads succeeded
+	result.Success = true
+	log.Printf("DUAL UPLOAD SUCCESS - Both Gofile and Filester uploads completed successfully")
+	log.Printf("  - Gofile URL: %s", result.GofileURL)
+	log.Printf("  - Filester URL: %s", result.FilesterURL)
+	if len(result.FilesterChunks) > 0 {
+		log.Printf("  - Filester chunks: %d", len(result.FilesterChunks))
 	}
-	if !filesterSuccess {
-		log.Printf("Filester upload failed: %v", filesterResp.err)
-		if result.Error != nil {
-			result.Error = fmt.Errorf("%v; Filester upload failed: %w", result.Error, filesterResp.err)
-		} else {
-			result.Error = fmt.Errorf("Filester upload failed: %w", filesterResp.err)
+	
+	// Validate URLs are not empty (BUG 1 & BUG 6 FIX)
+	if result.GofileURL == "" || result.FilesterURL == "" {
+		result.Success = false
+		result.Error = fmt.Errorf("upload succeeded but URLs are empty - Gofile: %q, Filester: %q", result.GofileURL, result.FilesterURL)
+		log.Printf("CRITICAL: %v", result.Error)
+		return result, result.Error
+	}
+	
+	// Validate chunk URLs if present (BUG 12 FIX)
+	for i, chunkURL := range result.FilesterChunks {
+		if chunkURL == "" {
+			result.Success = false
+			result.Error = fmt.Errorf("chunk %d URL is empty", i+1)
+			log.Printf("CRITICAL: %v", result.Error)
+			return result, result.Error
 		}
+	}
+	
+	// Log integrity verification results (Requirement 3.11)
+	if checksum != "" {
+		log.Printf("Upload integrity verification - File checksum: %s", checksum)
+		log.Printf("Note: Gofile and Filester APIs do not provide checksums in responses for verification")
+		log.Printf("Local file checksum logged for manual verification if needed")
 	}
 
-	log.Printf("Parallel upload completed - Gofile URL: %s, Filester URL: %s", result.GofileURL, result.FilesterURL)
-	
-	// Delete local file after successful dual upload (Requirements: 3.7, 14.9)
-	if gofileSuccess && filesterSuccess {
-		log.Printf("Both uploads succeeded, deleting local file: %s", filePath)
-		if err := os.Remove(filePath); err != nil {
-			log.Printf("Warning: Failed to delete local file %s: %v", filePath, err)
-			// Don't fail the upload operation if file deletion fails
-		} else {
-			log.Printf("Successfully deleted local file: %s", filePath)
-		}
-	} else {
-		log.Printf("Skipping file deletion - not all uploads succeeded (Gofile: %v, Filester: %v)", gofileSuccess, filesterSuccess)
-	}
+	// DO NOT delete file here - let the handler delete it after Supabase insert succeeds (BUG 3 FIX)
+	log.Printf("Both uploads succeeded - file will be deleted by handler after database insert")
 	
 	return result, nil
 }
