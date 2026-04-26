@@ -127,6 +127,166 @@ jobs:
             state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job.id }}-
             state-latest-job-${{ matrix.job.id }}
       
+      - name: Upload cached recordings from previous run
+        if: steps.restore_job_state.outputs.cache-hit == 'true'
+        env:
+          GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
+          FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          echo "📦 Checking for cached recordings from previous run..."
+          echo ""
+          
+          # Check if there are any recordings in cache
+          if [ -d "./videos" ] && [ "$(ls -A ./videos/*.{ts,mp4,mkv} 2>/dev/null)" ]; then
+            echo "📁 Found cached recordings:"
+            ls -lh ./videos/
+            echo ""
+            
+            # Check if upload credentials are configured
+            if [ -z "$GOFILE_API_KEY" ]; then
+              echo "⚠️  WARNING: GOFILE_API_KEY not configured"
+              echo "   Recordings will be preserved but not uploaded"
+              echo "   Add GOFILE_API_KEY secret to enable uploads"
+            else
+              echo "✅ Upload credentials found, uploading cached recordings..."
+              echo ""
+              
+              # Create upload and database script
+              cat > process_cached_recordings.sh << 'PROCESS_SCRIPT'
+          #!/bin/bash
+          
+          upload_to_gofile() {
+            local file="$1"
+            local api_key="$2"
+            
+            echo "  📤 Uploading to Gofile..."
+            
+            # Get server
+            SERVER=$(curl -s "https://api.gofile.io/servers" | jq -r '.data.servers[0].name' 2>/dev/null)
+            if [ -z "$SERVER" ] || [ "$SERVER" = "null" ]; then
+              # Fallback: try to extract server name differently
+              SERVER=$(curl -s "https://api.gofile.io/servers" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
+            fi
+            
+            if [ -z "$SERVER" ]; then
+              echo "  ❌ Failed to get Gofile server"
+              return 1
+            fi
+            
+            echo "  Using server: $SERVER"
+            
+            # Upload file
+            RESPONSE=$(curl -s -F "file=@$file" -F "token=$api_key" "https://$SERVER.gofile.io/contents/uploadfile")
+            
+            # Extract download page URL
+            DOWNLOAD_PAGE=$(echo "$RESPONSE" | jq -r '.data.downloadPage' 2>/dev/null)
+            
+            if [ -z "$DOWNLOAD_PAGE" ] || [ "$DOWNLOAD_PAGE" = "null" ]; then
+              # Fallback: try to extract URL differently
+              DOWNLOAD_PAGE=$(echo "$RESPONSE" | grep -o '"downloadPage":"[^"]*"' | cut -d'"' -f4)
+            fi
+            
+            if [ -n "$DOWNLOAD_PAGE" ] && [ "$DOWNLOAD_PAGE" != "null" ]; then
+              echo "  ✅ Gofile URL: $DOWNLOAD_PAGE"
+              echo "$DOWNLOAD_PAGE"
+              return 0
+            else
+              echo "  ❌ Upload failed"
+              echo "  Response: $RESPONSE"
+              return 1
+            fi
+          }
+          
+          save_to_database() {
+            local filename="$1"
+            local gofile_url="$2"
+            local filesize="$3"
+            
+            # Extract channel name and timestamp from filename
+            # Format: channelname_YYYY-MM-DD_HH-MM-SS.ts
+            CHANNEL=$(echo "$filename" | sed 's/_[0-9].*$//')
+            TIMESTAMP=$(echo "$filename" | sed 's/^.*_\([0-9-]*_[0-9-]*\)\..*$/\1/' | tr '_' ' ')
+            
+            echo "  💾 Saving to database..."
+            echo "     Channel: $CHANNEL"
+            echo "     Timestamp: $TIMESTAMP"
+            echo "     URL: $gofile_url"
+            
+            # Create database entry (JSON format)
+            mkdir -p ./database
+            ENTRY_FILE="./database/${CHANNEL}_$(date +%s).json"
+            
+            cat > "$ENTRY_FILE" << EOF
+          {
+            "channel": "$CHANNEL",
+            "timestamp": "$TIMESTAMP",
+            "gofile_url": "$gofile_url",
+            "filesize": $filesize,
+            "uploaded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "source": "cached_recording"
+          }
+          EOF
+            
+            echo "  ✅ Database entry created: $ENTRY_FILE"
+          }
+          
+          # Process each video file
+          UPLOADED_COUNT=0
+          FAILED_COUNT=0
+          
+          for video in ./videos/*.{ts,mp4,mkv} 2>/dev/null; do
+            [ -f "$video" ] || continue
+            
+            FILENAME=$(basename "$video")
+            FILESIZE=$(stat -f%z "$video" 2>/dev/null || stat -c%s "$video" 2>/dev/null)
+            
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📼 Processing: $FILENAME"
+            echo "   Size: $(du -h "$video" | cut -f1)"
+            echo ""
+            
+            # Try to upload
+            GOFILE_URL=$(upload_to_gofile "$video" "$GOFILE_API_KEY")
+            
+            if [ $? -eq 0 ] && [ -n "$GOFILE_URL" ]; then
+              echo ""
+              save_to_database "$FILENAME" "$GOFILE_URL" "$FILESIZE"
+              echo ""
+              echo "  🗑️  Deleting local file (uploaded successfully)..."
+              rm -f "$video"
+              echo "  ✅ Processing complete"
+              UPLOADED_COUNT=$((UPLOADED_COUNT + 1))
+            else
+              echo ""
+              echo "  ⚠️  Upload failed, keeping local file"
+              FAILED_COUNT=$((FAILED_COUNT + 1))
+            fi
+          done
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 Summary:"
+          echo "   ✅ Uploaded: $UPLOADED_COUNT"
+          echo "   ❌ Failed: $FAILED_COUNT"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          PROCESS_SCRIPT
+              
+              chmod +x process_cached_recordings.sh
+              bash process_cached_recordings.sh
+              
+              echo ""
+              echo "✅ Cached recordings processed"
+            fi
+          else
+            echo "ℹ️  No cached recordings found"
+          fi
+          
+          echo ""
+          echo "📦 Cache processing complete - ready to start fresh recording"
+      
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -304,96 +464,24 @@ jobs:
       
       - name: Emergency cleanup and upload (runs on cancellation)
         if: always()
-        env:
-          GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
-          FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
         run: |
-          echo "🛡️ Running emergency cleanup and upload..."
-          echo "This step runs even if the workflow was cancelled"
+          echo "🛡️ Emergency cleanup - preparing recordings for cache..."
+          echo "Recordings will be uploaded when the next workflow starts"
           echo ""
           
-          # Check if there are any recordings to upload
+          # Check if there are any recordings
           if [ -d "./videos" ] && [ "$(ls -A ./videos 2>/dev/null)" ]; then
             echo "📁 Found recordings in ./videos directory:"
             ls -lh ./videos/
             echo ""
-            
-            # Check if upload credentials are configured
-            if [ -z "$GOFILE_API_KEY" ] && [ -z "$FILESTER_API_KEY" ]; then
-              echo "⚠️  WARNING: No upload API keys configured"
-              echo "   Recordings will only be saved to GitHub Artifacts"
-              echo "   Add GOFILE_API_KEY and FILESTER_API_KEY secrets to enable uploads"
-            else
-              echo "✅ Upload credentials found, attempting to upload recordings..."
-              
-              # Build a simple upload script
-              cat > upload.sh << 'UPLOAD_SCRIPT'
-          #!/bin/bash
-          set -e
-          
-          upload_to_gofile() {
-            local file="$1"
-            local api_key="$2"
-            
-            if [ -z "$api_key" ]; then
-              echo "  ⚠️  Gofile API key not set, skipping"
-              return 1
-            fi
-            
-            echo "  📤 Uploading to Gofile..."
-            
-            # Get server
-            SERVER=$(curl -s "https://api.gofile.io/servers" | grep -o '"server":"[^"]*"' | cut -d'"' -f4 | head -1)
-            if [ -z "$SERVER" ]; then
-              echo "  ❌ Failed to get Gofile server"
-              return 1
-            fi
-            
-            # Upload file
-            RESPONSE=$(curl -s -F "file=@$file" -F "token=$api_key" "https://$SERVER.gofile.io/contents/uploadfile")
-            
-            # Extract download page URL
-            DOWNLOAD_PAGE=$(echo "$RESPONSE" | grep -o '"downloadPage":"[^"]*"' | cut -d'"' -f4)
-            
-            if [ -n "$DOWNLOAD_PAGE" ]; then
-              echo "  ✅ Gofile URL: $DOWNLOAD_PAGE"
-              return 0
-            else
-              echo "  ❌ Upload failed: $RESPONSE"
-              return 1
-            fi
-          }
-          
-          # Process each video file
-          for video in ./videos/*.{ts,mp4,mkv,flv} 2>/dev/null; do
-            [ -f "$video" ] || continue
-            
-            echo ""
-            echo "📼 Processing: $(basename "$video")"
-            echo "   Size: $(du -h "$video" | cut -f1)"
-            
-            # Try to upload
-            if upload_to_gofile "$video" "$GOFILE_API_KEY"; then
-              echo "   ✅ Upload successful"
-              # Don't delete - let artifacts preserve it as backup
-            else
-              echo "   ⚠️  Upload failed, file will be preserved in artifacts"
-            fi
-          done
-          
-          echo ""
-          echo "✅ Emergency upload complete"
-          UPLOAD_SCRIPT
-              
-              chmod +x upload.sh
-              bash upload.sh || echo "⚠️  Upload script failed, recordings preserved in artifacts"
-            fi
+            echo "✅ These recordings will be saved to cache"
+            echo "✅ Next workflow run will upload them automatically"
           else
             echo "ℹ️  No recordings found in ./videos directory"
           fi
           
           echo ""
-          echo "🛡️ Emergency cleanup complete"
+          echo "🛡️ Emergency cleanup complete - recordings ready for cache"
       
       - name: Save shared configuration cache
         if: always()
