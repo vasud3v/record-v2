@@ -101,25 +101,15 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 		return fetchStreamViaFlareSolverr(ctx, username)
 	}
 
-	// Normal mode: try legacy API first, then HLS API fallback
-	fmt.Printf("[DEBUG] %s: Trying both API endpoints for better detection\n", username)
-	legacyStream, legacyErr := fetchStreamLegacy(ctx, client, username)
-	if legacyErr == nil && legacyStream != nil && legacyStream.HLSSource != "" {
-		fmt.Printf("[INFO] %s: Legacy API returned stream successfully\n", username)
-		return legacyStream, nil
-	}
-
-	// Try alternative HLS API endpoint
+	// Normal mode: Use edge HLS API as primary method (most reliable)
+	fmt.Printf("[DEBUG] %s: Checking stream status via edge HLS API\n", username)
 	apiURL := fmt.Sprintf("%sget_edge_hls_url_ajax/", server.Config.Domain)
 	roomReferer := fmt.Sprintf("%s%s/", server.Config.Domain, username)
 	postData := fmt.Sprintf("room_slug=%s&bandwidth=high", username)
 
 	body, err := client.PostWithReferer(ctx, apiURL, postData, roomReferer)
 	if err != nil {
-		if legacyStream != nil {
-			return legacyStream, legacyErr
-		}
-		return nil, err
+		return nil, fmt.Errorf("edge API request failed: %w", err)
 	}
 
 	var hlsResp struct {
@@ -129,38 +119,40 @@ func FetchStream(ctx context.Context, client *internal.Req, username string) (*S
 	}
 
 	if err := json.Unmarshal([]byte(body), &hlsResp); err != nil {
-		if legacyStream != nil {
-			return legacyStream, legacyErr
-		}
-		return nil, err
+		return nil, fmt.Errorf("parse edge API response: %w", err)
 	}
 
-	fmt.Printf("[INFO] %s: HLS API Response - room_status=%q, url_present=%v, success=%v\n",
+	fmt.Printf("[INFO] %s: room_status=%q, url_present=%v, success=%v\n",
 		username, hlsResp.RoomStatus, hlsResp.URL != "", hlsResp.Success)
 
+	// If stream is online and we have a URL, return it immediately
 	if hlsResp.Success && hlsResp.URL != "" {
+		fmt.Printf("[INFO] %s: ✅ Stream is online\n", username)
 		return &Stream{HLSSource: hlsResp.URL}, nil
 	}
 
+	// Handle offline/unavailable states - no fallbacks, just return the status
 	meta := &Stream{}
-	if legacyStream != nil {
-		meta = legacyStream
-	}
-
+	
 	switch hlsResp.RoomStatus {
+	case "offline":
+		fmt.Printf("[INFO] %s: Channel is offline\n", username)
+		return meta, internal.ErrChannelOffline
 	case "private":
+		fmt.Printf("[INFO] %s: Channel is in private show\n", username)
 		return meta, internal.ErrPrivateStream
 	case "hidden":
+		fmt.Printf("[INFO] %s: Channel is in hidden show\n", username)
 		return meta, internal.ErrHiddenStream
-	case "offline":
-		if legacyErr != nil && legacyErr != internal.ErrChannelOffline {
-			return meta, legacyErr
-		}
+	case "away":
+		fmt.Printf("[INFO] %s: Performer is away\n", username)
 		return meta, internal.ErrChannelOffline
+	case "password protected":
+		fmt.Printf("[INFO] %s: Room is password protected\n", username)
+		return meta, internal.ErrRoomPasswordRequired
 	default:
-		if legacyErr != nil {
-			return meta, legacyErr
-		}
+		// Unknown status or empty status - treat as offline
+		fmt.Printf("[INFO] %s: Unknown status %q, treating as offline\n", username, hlsResp.RoomStatus)
 		return meta, internal.ErrChannelOffline
 	}
 }
@@ -223,107 +215,11 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 	// Format: window.initialRoomDossier = "...escaped JSON..."
 	stream, err := parseInitialRoomDossier(htmlBody, cleanUsername)
 	if err != nil {
-		// If we can't find initialRoomDossier, try to find HLS URL directly in the HTML
 		fmt.Printf("[INFO] %s: Could not parse initialRoomDossier: %v\n", username, err)
-		fmt.Printf("[INFO] %s: Searching for HLS stream URL directly in HTML...\n", username)
 		
-		// Search for .m3u8 URLs in the HTML
-		hlsURL := extractHLSURL(htmlBody)
-		if hlsURL != "" {
-			fmt.Printf("[INFO] %s: ✅ Found HLS URL directly in HTML!\n", username)
-			return &Stream{
-				HLSSource: hlsURL,
-			}, nil
-		}
-		
-		fmt.Printf("[DEBUG] %s: No HLS URL found in HTML\n", username)
-		
-		// Save HTML to file for debugging (only in CI mode)
-		if os.Getenv("GITHUB_ACTIONS") == "true" {
-			debugFile := fmt.Sprintf("/tmp/chaturbate_debug_%s_%d.html", cleanUsername, time.Now().Unix())
-			if err := os.WriteFile(debugFile, []byte(htmlBody), 0644); err == nil {
-				fmt.Printf("[DEBUG] %s: Saved HTML to %s for debugging\n", username, debugFile)
-			}
-		}
-		
-		// FALLBACK: Try the edge HLS URL AJAX API endpoint
-		// This is the current method used by yt-dlp
-		fmt.Printf("[INFO] %s: Trying edge HLS URL API as fallback...\n", username)
-		
-		edgeAPIURL := fmt.Sprintf("%sget_edge_hls_url_ajax/", server.Config.Domain)
-		fmt.Printf("[DEBUG] %s: Calling edge API: %s\n", username, edgeAPIURL)
-		
-		// POST data
-		postData := fmt.Sprintf("room_slug=%s", cleanUsername)
-		
-		// Headers for the API call
-		apiHeaders := map[string]string{
-			"Accept":           "application/json",
-			"Content-Type":     "application/x-www-form-urlencoded",
-			"X-Requested-With": "XMLHttpRequest",
-		}
-		
-		apiBody, _, _, err := flare.PostWithCookiesAndUA(ctx, edgeAPIURL, postData, cookies, apiHeaders)
-		if err != nil {
-			fmt.Printf("[WARN] %s: Edge API call failed: %v\n", username, err)
-			return &Stream{}, internal.ErrChannelOffline
-		}
-		
-		fmt.Printf("[DEBUG] %s: Edge API response received (length: %d)\n", username, len(apiBody))
-		
-		// Parse JSON response
-		var edgeResp struct {
-			URL        string `json:"url"`
-			RoomStatus string `json:"room_status"`
-		}
-		
-		if err := json.Unmarshal([]byte(apiBody), &edgeResp); err != nil {
-			fmt.Printf("[ERROR] %s: Failed to parse edge API response: %v\n", username, err)
-			fmt.Printf("[ERROR] %s: Raw response: %s\n", username, truncate(apiBody, 500))
-			return &Stream{}, internal.ErrChannelOffline
-		}
-		
-		fmt.Printf("[INFO] %s: Edge API Response - room_status=%q, url_present=%v\n", 
-			username, edgeResp.RoomStatus, edgeResp.URL != "")
-		
-		// Check if channel is genuinely offline
-		if edgeResp.RoomStatus == "offline" {
-			fmt.Printf("[INFO] %s: Channel is offline (confirmed by edge API)\n", username)
-			return &Stream{}, internal.ErrChannelOffline
-		}
-		
-		// Check for other non-available statuses
-		switch edgeResp.RoomStatus {
-		case "private":
-			fmt.Printf("[INFO] %s: Channel is in private show\n", username)
-			return &Stream{}, internal.ErrPrivateStream
-		case "hidden":
-			fmt.Printf("[INFO] %s: Channel is in hidden show\n", username)
-			return &Stream{}, internal.ErrHiddenStream
-		case "away":
-			fmt.Printf("[INFO] %s: Performer is away\n", username)
-			return &Stream{}, internal.ErrChannelOffline
-		case "password protected":
-			fmt.Printf("[INFO] %s: Room is password protected\n", username)
-			return &Stream{}, internal.ErrRoomPasswordRequired
-		}
-		
-		if edgeResp.URL != "" {
-			fmt.Printf("[INFO] %s: ✅ Edge API successful! HLS URL found\n", username)
-			
-			// Clean up fast_start parameter
-			hlsURL := edgeResp.URL
-			hlsURL = strings.ReplaceAll(hlsURL, "?fast_start=true&", "?")
-			hlsURL = strings.ReplaceAll(hlsURL, "&fast_start=true", "")
-			hlsURL = strings.ReplaceAll(hlsURL, "?fast_start=true", "")
-			
-			return &Stream{
-				HLSSource: hlsURL,
-			}, nil
-		}
-		
-		fmt.Printf("[WARN] %s: Edge API returned no URL (room_status=%s)\n", username, edgeResp.RoomStatus)
-		
+		// If we can't parse the dossier, the channel is likely offline or doesn't exist
+		// No need to try fallbacks - just return offline
+		fmt.Printf("[INFO] %s: Channel appears to be offline (no room data found)\n", username)
 		return &Stream{}, internal.ErrChannelOffline
 	}
 
@@ -522,89 +418,6 @@ func parseInitialRoomDossier(html, username string) (*Stream, error) {
 		return meta, internal.ErrChannelOffline
 	default:
 		fmt.Printf("[INFO] %s: Unknown room_status=%q, treating as offline\n", username, dossier.RoomStatus)
-		return meta, internal.ErrChannelOffline
-	}
-}
-
-// fetchStreamLegacy is the original implementation using /api/chatvideocontext/
-func fetchStreamLegacy(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
-	fmt.Printf("[DEBUG] %s: Falling back to legacy API\n", username)
-	
-	apiURL := fmt.Sprintf("%sapi/chatvideocontext/%s/", server.Config.Domain, username)
-	fmt.Printf("[DEBUG] %s: Calling API: %s\n", username, apiURL)
-	body, err := client.Get(ctx, apiURL)
-	if err != nil {
-		fmt.Printf("[ERROR] %s: API call failed: %v\n", username, err)
-		return nil, fmt.Errorf("failed to get stream info: %w", err)
-	}
-	
-	fmt.Printf("[DEBUG] %s: API response received (length: %d)\n", username, len(body))
-
-	var resp apiResponse
-	if err := json.Unmarshal([]byte(body), &resp); err != nil {
-		fmt.Printf("[ERROR] %s: Failed to parse API response: %v\n", username, err)
-		fmt.Printf("[ERROR] %s: Raw response (first 500 chars): %s\n", username, truncate(body, 500))
-		return nil, fmt.Errorf("failed to parse stream info: %w", err)
-	}
-	
-	// ALWAYS log the full API response for debugging
-	fmt.Printf("[INFO] %s: API Response - room_status=%q, hls_source_present=%v, code=%q, num_viewers=%d\n", 
-		username, resp.RoomStatus, resp.HLSSource != "", resp.Code, resp.NumViewers)
-
-	if resp.Code == "unauthorized" {
-		fmt.Printf("[ERROR] %s: Room requires password\n", username)
-		return nil, internal.ErrRoomPasswordRequired
-	}
-
-	if server.Config.Debug {
-		fmt.Printf("[DEBUG] API response for %s: room_status=%s hls_source=%v\n", username, resp.RoomStatus, resp.HLSSource != "")
-	}
-	
-	// Always log when hls_source is empty but we expect the channel to be live
-	// This helps debug why public streams are detected as private/offline
-	if resp.HLSSource == "" {
-		fmt.Printf("[INFO] %s: No HLS source in API response (room_status=%s, code=%s)\n", username, resp.RoomStatus, resp.Code)
-		if resp.RoomStatus == "" {
-			fmt.Printf("[INFO] %s: Empty room_status might indicate API access issue\n", username)
-			// Log first 500 chars of response for debugging
-			if len(body) > 0 {
-				preview := body
-				if len(preview) > 500 {
-					preview = preview[:500] + "..."
-				}
-				fmt.Printf("[DEBUG] API response body: %s\n", preview)
-			}
-		}
-		
-		// CRITICAL: If room_status is "public" but hls_source is empty,
-		// this means we're hitting an age gate or need authentication
-		if resp.RoomStatus == "public" {
-			fmt.Printf("[WARN] %s: Room is PUBLIC but no HLS source - likely age verification required\n", username)
-			fmt.Printf("[WARN] %s: Try visiting https://chaturbate.com/%s/ in browser and copying ALL cookies\n", username, username)
-			return nil, internal.ErrAgeVerification
-		}
-	}
-
-	// Always populate static metadata so the caller can update it even when offline.
-	meta := &Stream{
-		RoomTitle:        resp.RoomTitle,
-		Gender:           resp.Gender,
-		EdgeRegion:       resp.EdgeRegion,
-		SummaryCardImage: resp.SummaryCardImage,
-	}
-
-	if resp.HLSSource != "" {
-		meta.HLSSource = resp.HLSSource
-		meta.NumViewers = resp.NumViewers
-		return meta, nil
-	}
-
-	switch resp.RoomStatus {
-	case "private":
-		return meta, internal.ErrPrivateStream
-	case "hidden":
-		return meta, internal.ErrHiddenStream
-	default:
 		return meta, internal.ErrChannelOffline
 	}
 }
@@ -1520,46 +1333,3 @@ func truncate(s string, n int) string {
 }
 
 
-// extractHLSURL searches for .m3u8 URLs directly in the HTML
-// This is a fallback when initialRoomDossier is not available
-func extractHLSURL(html string) string {
-	// Search for .m3u8 URLs in the HTML
-	// Common patterns:
-	// - https://edge*.stream.highwebmedia.com/.../*.m3u8
-	// - "hls_source":"https://..."
-	
-	// Pattern 1: Look for hls_source in JSON
-	if idx := strings.Index(html, `"hls_source":"`); idx != -1 {
-		start := idx + len(`"hls_source":"`)
-		end := strings.Index(html[start:], `"`)
-		if end != -1 {
-			url := html[start : start+end]
-			// Unescape JSON string
-			url = strings.ReplaceAll(url, `\/`, `/`)
-			if strings.Contains(url, ".m3u8") {
-				return url
-			}
-		}
-	}
-	
-	// Pattern 2: Look for any .m3u8 URL
-	m3u8Idx := strings.Index(html, ".m3u8")
-	if m3u8Idx != -1 {
-		// Find the start of the URL (look backwards for http)
-		start := strings.LastIndex(html[:m3u8Idx], "http")
-		if start != -1 {
-			// Find the end of the URL (look forward for quote or space)
-			end := m3u8Idx + len(".m3u8")
-			for end < len(html) && html[end] != '"' && html[end] != '\'' && html[end] != ' ' && html[end] != '<' {
-				end++
-			}
-			url := html[start:end]
-			// Clean up any escape sequences
-			url = strings.ReplaceAll(url, `\/`, `/`)
-			url = strings.ReplaceAll(url, `\u002F`, `/`)
-			return url
-		}
-	}
-	
-	return ""
-}
