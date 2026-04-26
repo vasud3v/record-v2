@@ -302,6 +302,99 @@ jobs:
               exit $EXIT_CODE
             }
       
+      - name: Emergency cleanup and upload (runs on cancellation)
+        if: always()
+        env:
+          GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
+          FILESTER_API_KEY: ${{ secrets.FILESTER_API_KEY }}
+        run: |
+          echo "🛡️ Running emergency cleanup and upload..."
+          echo "This step runs even if the workflow was cancelled"
+          echo ""
+          
+          # Check if there are any recordings to upload
+          if [ -d "./videos" ] && [ "$(ls -A ./videos 2>/dev/null)" ]; then
+            echo "📁 Found recordings in ./videos directory:"
+            ls -lh ./videos/
+            echo ""
+            
+            # Check if upload credentials are configured
+            if [ -z "$GOFILE_API_KEY" ] && [ -z "$FILESTER_API_KEY" ]; then
+              echo "⚠️  WARNING: No upload API keys configured"
+              echo "   Recordings will only be saved to GitHub Artifacts"
+              echo "   Add GOFILE_API_KEY and FILESTER_API_KEY secrets to enable uploads"
+            else
+              echo "✅ Upload credentials found, attempting to upload recordings..."
+              
+              # Build a simple upload script
+              cat > upload.sh << 'UPLOAD_SCRIPT'
+          #!/bin/bash
+          set -e
+          
+          upload_to_gofile() {
+            local file="$1"
+            local api_key="$2"
+            
+            if [ -z "$api_key" ]; then
+              echo "  ⚠️  Gofile API key not set, skipping"
+              return 1
+            fi
+            
+            echo "  📤 Uploading to Gofile..."
+            
+            # Get server
+            SERVER=$(curl -s "https://api.gofile.io/servers" | grep -o '"server":"[^"]*"' | cut -d'"' -f4 | head -1)
+            if [ -z "$SERVER" ]; then
+              echo "  ❌ Failed to get Gofile server"
+              return 1
+            fi
+            
+            # Upload file
+            RESPONSE=$(curl -s -F "file=@$file" -F "token=$api_key" "https://$SERVER.gofile.io/contents/uploadfile")
+            
+            # Extract download page URL
+            DOWNLOAD_PAGE=$(echo "$RESPONSE" | grep -o '"downloadPage":"[^"]*"' | cut -d'"' -f4)
+            
+            if [ -n "$DOWNLOAD_PAGE" ]; then
+              echo "  ✅ Gofile URL: $DOWNLOAD_PAGE"
+              return 0
+            else
+              echo "  ❌ Upload failed: $RESPONSE"
+              return 1
+            fi
+          }
+          
+          # Process each video file
+          for video in ./videos/*.{ts,mp4,mkv,flv} 2>/dev/null; do
+            [ -f "$video" ] || continue
+            
+            echo ""
+            echo "📼 Processing: $(basename "$video")"
+            echo "   Size: $(du -h "$video" | cut -f1)"
+            
+            # Try to upload
+            if upload_to_gofile "$video" "$GOFILE_API_KEY"; then
+              echo "   ✅ Upload successful"
+              # Don't delete - let artifacts preserve it as backup
+            else
+              echo "   ⚠️  Upload failed, file will be preserved in artifacts"
+            fi
+          done
+          
+          echo ""
+          echo "✅ Emergency upload complete"
+          UPLOAD_SCRIPT
+              
+              chmod +x upload.sh
+              bash upload.sh || echo "⚠️  Upload script failed, recordings preserved in artifacts"
+            fi
+          else
+            echo "ℹ️  No recordings found in ./videos directory"
+          fi
+          
+          echo ""
+          echo "🛡️ Emergency cleanup complete"
+      
       - name: Save shared configuration cache
         if: always()
         uses: actions/cache/save@v4
