@@ -258,18 +258,22 @@ jobs:
             # Date-based JSON file
             DB_FILE="./database/$CHANNEL/$DATE.json"
             
-            # Create new entry
-            NEW_ENTRY=$(cat << EOF
-{
-  "channel": "$CHANNEL",
-  "timestamp": "$TIMESTAMP",
-  "gofile_url": "$gofile_url",
-  "filesize": $filesize,
-  "uploaded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "source": "cached_recording"
-}
-EOF
-)
+            # Create new entry using jq
+            NEW_ENTRY=$(jq -n \
+              --arg channel "$CHANNEL" \
+              --arg timestamp "$TIMESTAMP" \
+              --arg gofile_url "$gofile_url" \
+              --arg filesize "$filesize" \
+              --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{
+                channel: $channel,
+                timestamp: $timestamp,
+                gofile_url: $gofile_url,
+                filesize: ($filesize | tonumber),
+                uploaded_at: $uploaded_at,
+                source: "cached_recording"
+              }'
+            )
             
             # If file exists, append to array; otherwise create new array
             if [ -f "$DB_FILE" ]; then
@@ -362,14 +366,7 @@ EOF
               echo "ℹ️  No new database entries to commit"
             else
               # Commit with cached upload flag
-              COMMIT_MSG="chore: update recording database (cached uploads) [skip ci]
-
-Job: ${{ matrix.job.id }}
-Channel: ${{ matrix.job.channel }}
-Run ID: ${{ github.run_id }}
-Session: ${{ needs.validate.outputs.session_id }}
-Source: Cached recordings from previous run
-Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              COMMIT_MSG=$'chore: update recording database (cached uploads) [skip ci]\n\nJob: ${{ matrix.job.id }}\nChannel: ${{ matrix.job.channel }}\nRun ID: ${{ github.run_id }}\nSession: ${{ needs.validate.outputs.session_id }}\nSource: Cached recordings from previous run\nTimestamp: '"$(date -u +%Y-%m-%dT%H:%M:%SZ)"
               
               git commit -m "$COMMIT_MSG"
               
@@ -684,14 +681,7 @@ Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
               echo "ℹ️  No new database entries to commit"
             else
               # Commit with emergency flag
-              COMMIT_MSG="chore: emergency database update [skip ci]
-
-Job: ${{ matrix.job.id }}
-Channel: ${{ matrix.job.channel }}
-Run ID: ${{ github.run_id }}
-Session: ${{ needs.validate.outputs.session_id }}
-Status: Emergency/Timeout
-Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              COMMIT_MSG=$'chore: emergency database update [skip ci]\n\nJob: ${{ matrix.job.id }}\nChannel: ${{ matrix.job.channel }}\nRun ID: ${{ github.run_id }}\nSession: ${{ needs.validate.outputs.session_id }}\nStatus: Emergency/Timeout\nTimestamp: '"$(date -u +%Y-%m-%dT%H:%M:%SZ)"
               
               git commit -m "$COMMIT_MSG"
               
@@ -845,13 +835,7 @@ Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
               echo "ℹ️  No new database entries to commit"
             else
               # Commit with detailed message
-              COMMIT_MSG="chore: update recording database [skip ci]
-
-Job: ${{ matrix.job.id }}
-Channel: ${{ matrix.job.channel }}
-Run ID: ${{ github.run_id }}
-Session: ${{ needs.validate.outputs.session_id }}
-Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              COMMIT_MSG=$'chore: update recording database [skip ci]\n\nJob: ${{ matrix.job.id }}\nChannel: ${{ matrix.job.channel }}\nRun ID: ${{ github.run_id }}\nSession: ${{ needs.validate.outputs.session_id }}\nTimestamp: '"$(date -u +%Y-%m-%dT%H:%M:%SZ)"
               
               git commit -m "$COMMIT_MSG"
               
