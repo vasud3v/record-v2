@@ -58,20 +58,21 @@ jobs:
       - name: Generate matrix configuration
         id: generate_matrix
         run: |
-          # Generate matrix job IDs based on validated matrix_job_count
+          # Generate matrix jobs as array of objects containing id and channel name
           MATRIX_COUNT="${{ steps.validate.outputs.validated_matrix_count }}"
-          MATRIX_JOBS=$(seq 1 $MATRIX_COUNT | jq -R . | jq -s -c .)
+          CHANNELS_LIST="${{ steps.validate.outputs.resolved_channels }}"
+          MATRIX_JOBS=$(echo "$CHANNELS_LIST" | tr ',' '\n' | head -n $MATRIX_COUNT | jq -R -s -c 'split("\n") | map(select(length > 0)) | to_entries | map({"id": (.key + 1 | tostring), "channel": .value})')
           echo "matrix_jobs=$MATRIX_JOBS" >> $GITHUB_OUTPUT
           echo "Generated matrix jobs: $MATRIX_JOBS"
 
   record:
-    name: Record (Job ${{ matrix.job_id }})
+    name: Record (${{ matrix.job.channel }})
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 330  # 5.5 hours (5 hours 30 minutes)
     strategy:
       matrix:
-        job_id: ${{ fromJson(needs.validate.outputs.matrix_jobs) }}
+        job: ${{ fromJson(needs.validate.outputs.matrix_jobs) }}
       fail-fast: false  # Continue other jobs even if one fails
       max-parallel: 20  # Allow up to 20 concurrent jobs
     
@@ -106,7 +107,7 @@ jobs:
         with:
           path: |
             ./conf
-          key: shared-config-${{ github.run_id }}-${{ matrix.job_id }}
+          key: shared-config-${{ github.run_id }}-${{ matrix.job.id }}
           restore-keys: |
             shared-config-
       
@@ -121,10 +122,10 @@ jobs:
             ./videos
             ./state
             ./partial
-          key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job_id }}-${{ github.run_id }}
+          key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job.id }}-${{ github.run_id }}
           restore-keys: |
-            state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job_id }}-
-            state-latest-job-${{ matrix.job_id }}
+            state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job.id }}-
+            state-latest-job-${{ matrix.job.id }}
       
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -238,7 +239,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
-          MATRIX_JOB_ID: ${{ matrix.job_id }}
+          MATRIX_JOB_ID: ${{ matrix.job.id }}
           MATRIX_JOB_COUNT: ${{ steps.validate.outputs.validated_matrix_count }}
           SESSION_ID: ${{ needs.validate.outputs.session_id }}
           CHANNELS: ${{ needs.validate.outputs.channels }}
@@ -269,7 +270,7 @@ jobs:
             --matrix-job-id $MATRIX_JOB_ID \
             --session-id $SESSION_ID \
             --channels "$CHANNELS" \
-            --interval 5
+            --interval 1
       
       - name: Save shared configuration cache
         if: always()
@@ -280,7 +281,7 @@ jobs:
         with:
           path: |
             ./conf
-          key: shared-config-${{ github.run_id }}-${{ matrix.job_id }}
+          key: shared-config-${{ github.run_id }}-${{ matrix.job.id }}
       
       - name: Save job-specific state cache
         if: always()
@@ -293,13 +294,13 @@ jobs:
             ./videos
             ./state
             ./partial
-          key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job_id }}-${{ github.run_id }}
+          key: state-${{ needs.validate.outputs.session_id }}-job-${{ matrix.job.id }}-${{ github.run_id }}
       
       - name: Upload artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: recordings-job-${{ matrix.job_id }}-${{ github.run_id }}
+          name: recordings-job-${{ matrix.job.id }}-${{ github.run_id }}
           path: |
             ./videos/**/*
             ./state/**/*
@@ -314,9 +315,9 @@ jobs:
           mkdir -p ./status
           
           # Generate status file with current job information
-          cat > ./status/job-${{ matrix.job_id }}.json << EOF
+          cat > ./status/job-${{ matrix.job.id }}.json << EOF
           {
-            "job_id": "${{ matrix.job_id }}",
+            "job_id": "${{ matrix.job.id }}",
             "session_id": "${{ needs.validate.outputs.session_id }}",
             "run_id": "${{ github.run_id }}",
             "status": "${{ job.status }}",
@@ -325,7 +326,7 @@ jobs:
           }
           EOF
           
-          echo "Status file created for job ${{ matrix.job_id }}"
+          echo "Status file created for job ${{ matrix.job.id }}"
 
   summary:
     name: Workflow Summary

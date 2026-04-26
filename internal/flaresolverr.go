@@ -24,6 +24,7 @@ type FlareSolverrRequest struct {
 	MaxTimeout int               `json:"maxTimeout"`
 	Cookies    []FlareCookie     `json:"cookies,omitempty"`
 	Headers    map[string]string `json:"headers,omitempty"`
+	PostData   string            `json:"postData,omitempty"`
 }
 
 // FlareCookie represents a cookie for FlareSolverr

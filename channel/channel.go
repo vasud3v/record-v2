@@ -33,8 +33,9 @@ type Channel struct {
 	NumViewers          int
 	EdgeRegion          string
 	SummaryCardImage    string
-	LiveThumbURL        string
-	CFBlockCount        int
+	LiveThumbURL         string
+	CFBlockCount         int
+	lastReportedProgress int
 
 	logsMu sync.RWMutex
 	Logs   []string

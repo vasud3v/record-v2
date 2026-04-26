@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"os"
 	"time"
 
 	"github.com/HeapOfChaos/goondvr/chaturbate"
@@ -336,12 +337,27 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 	}
 	ch.fileMu.Unlock()
 
-	ch.Verbose("duration: %s, filesize: %s", formattedDuration, formattedFilesize)
+	if os.Getenv("GITHUB_ACTIONS") == "true" {
+		// Live streams have no predetermined length, so a percentage progress bar is misleading.
+		// Instead, we use a sparse time-based heartbeat (e.g., every 5 minutes) to show it's active.
+		minutes := int(ch.Duration) / 60
+		reportInterval := 5 // Report every 5 minutes
+		
+		if minutes > 0 && minutes%reportInterval == 0 && minutes > ch.lastReportedProgress {
+			ch.Info("—— Recording Active | Duration: %s | Current File: %s", formattedDuration, formattedFilesize)
+			ch.lastReportedProgress = minutes
+		}
+	} else {
+		ch.Verbose("duration: %s, filesize: %s", formattedDuration, formattedFilesize)
+	}
 
 	// Send an SSE update to update the view
 	ch.Update()
 
 	if newFilename != "" {
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			ch.lastReportedProgress = 0 // Reset for the next file
+		}
 		ch.Info("max filesize or duration exceeded, new file created: %s", newFilename)
 		return nil
 	}

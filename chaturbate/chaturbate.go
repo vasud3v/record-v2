@@ -299,7 +299,17 @@ func parseInitialRoomDossier(html, username string) (*Stream, error) {
 	}
 
 	if dossier.HLSSource != "" {
-		meta.HLSSource = dossier.HLSSource
+		// Clean up fast_start=true which limits resolution to 540p or lower for fast initial playback
+		hlsURL := dossier.HLSSource
+		hlsURL = strings.ReplaceAll(hlsURL, "?fast_start=true&", "?")
+		hlsURL = strings.ReplaceAll(hlsURL, "&fast_start=true", "")
+		hlsURL = strings.ReplaceAll(hlsURL, "?fast_start=true", "")
+		
+		if hlsURL != dossier.HLSSource {
+			fmt.Printf("[DEBUG] %s: Removed fast_start=true from HLS URL to allow maximum quality\n", username)
+		}
+		
+		meta.HLSSource = hlsURL
 		fmt.Printf("[INFO] %s: ✅ Stream detected via FlareSolverr! HLS URL found\n", username)
 		return meta, nil
 	}
@@ -454,6 +464,11 @@ func FetchPlaylist(ctx context.Context, hlsSource string, resolution, framerate 
 		// The page loaded but the stream is not active — treat as offline.
 		return nil, internal.ErrChannelOffline
 	}
+
+	// Clean up fast_start=true which restricts the playlist to lower qualities
+	hlsSource = strings.ReplaceAll(hlsSource, "?fast_start=true&", "?")
+	hlsSource = strings.ReplaceAll(hlsSource, "&fast_start=true", "")
+	hlsSource = strings.ReplaceAll(hlsSource, "?fast_start=true", "")
 
 	var client *internal.Req
 	if cdnReferer != "" {

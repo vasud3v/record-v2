@@ -218,6 +218,69 @@ func (f *FlareSolverrClient) GetWithCookiesAndUA(ctx context.Context, url string
 	return flareResp.Solution.Response, resultCookies, userAgent, nil
 }
 
+// PostWithCookiesAndUA makes a POST request and returns response, cookies, and User-Agent
+func (f *FlareSolverrClient) PostWithCookiesAndUA(ctx context.Context, url string, postData string, cookies map[string]string, headers map[string]string) (string, map[string]string, string, error) {
+	// Convert cookies to FlareSolverr format
+	var flareCookies []FlareCookie
+	for name, value := range cookies {
+		flareCookies = append(flareCookies, FlareCookie{
+			Name:  name,
+			Value: value,
+		})
+	}
+
+	reqData := FlareSolverrRequest{
+		Cmd:        "request.post",
+		URL:        url,
+		MaxTimeout: 180000, // 180 seconds (3 minutes) - increased for difficult challenges
+		Cookies:    flareCookies,
+		Headers:    headers,
+		PostData:   postData,
+	}
+
+	jsonData, err := json.Marshal(reqData)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", f.baseURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", nil, "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", nil, "", fmt.Errorf("read response: %w", err)
+	}
+
+	var flareResp FlareSolverrResponse
+	if err := json.Unmarshal(body, &flareResp); err != nil {
+		return "", nil, "", fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	if flareResp.Status != "ok" {
+		return "", nil, "", fmt.Errorf("flaresolverr error: %s", flareResp.Message)
+	}
+
+	// Extract cookies from response
+	resultCookies := make(map[string]string)
+	for _, cookie := range flareResp.Solution.Cookies {
+		resultCookies[cookie.Name] = cookie.Value
+	}
+
+	// Extract User-Agent from response
+	userAgent := flareResp.Solution.UserAgent
+
+	return flareResp.Solution.Response, resultCookies, userAgent, nil
+}
+
 // ShouldRefreshCookies checks if cookies need to be refreshed
 // In GitHub Actions, we should refresh cookies on startup
 func ShouldRefreshCookies() bool {
