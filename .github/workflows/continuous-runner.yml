@@ -203,276 +203,187 @@ jobs:
               # instead of relying on the exit code of a grep pipe, which was
               # checking the wrong process.
               # ─────────────────────────────────────────────────────────────
-              cat > process_cached_recordings.sh << 'PROCESS_SCRIPT'
-#!/bin/bash
+              # FIX (YAML parse error): functions are now defined inline within the
+              # run: | block instead of via a heredoc at column 0.  A heredoc whose
+              # content starts at column 0 terminates the YAML block scalar early,
+              # causing GitHub Actions to reject the workflow file.
 
-convert_to_mp4() {
-  local input_file="$1"
-  local output_file="${input_file%.ts}.mp4"
+              convert_to_mp4() {
+                local input_file="$1"
+                local output_file="${input_file%.ts}.mp4"
+                echo "  Converting .ts to .mp4..." >&2
+                if ! command -v ffmpeg &>/dev/null; then
+                  echo "  ffmpeg not found, uploading .ts as-is" >&2
+                  echo "$input_file"; return 0
+                fi
+                if ! ffmpeg -nostdin -y -i "$input_file" -c copy -movflags +faststart "$output_file" 2>/dev/null; then
+                  echo "  Conversion failed, uploading .ts as-is" >&2
+                  echo "$input_file"; return 0
+                fi
+                if [ -f "$output_file" ] && [ -s "$output_file" ]; then
+                  echo "  Converted to MP4: $(du -h "$output_file" | cut -f1)" >&2
+                  rm -f "$input_file"
+                  echo "$output_file"; return 0
+                else
+                  echo "  Output invalid, uploading .ts as-is" >&2
+                  rm -f "$output_file"
+                  echo "$input_file"; return 0
+                fi
+              }
 
-  echo "  🎬 Converting .ts to .mp4 with ffmpeg..." >&2
+              fix_mp4_streaming() {
+                local input_file="$1"
+                local temp_file="${input_file%.mp4}_fixed.mp4"
+                echo "  Fixing MP4 moov atom..." >&2
+                if ! command -v ffmpeg &>/dev/null; then
+                  echo "  ffmpeg not found, uploading MP4 as-is" >&2
+                  echo "$input_file"; return 0
+                fi
+                if ! ffmpeg -nostdin -y -i "$input_file" -c copy -movflags +faststart "$temp_file" 2>/dev/null; then
+                  echo "  Fix failed, uploading original" >&2
+                  rm -f "$temp_file"
+                  echo "$input_file"; return 0
+                fi
+                if [ -f "$temp_file" ] && [ -s "$temp_file" ]; then
+                  echo "  Fixed MP4: $(du -h "$temp_file" | cut -f1)" >&2
+                  mv "$temp_file" "$input_file"
+                  echo "$input_file"; return 0
+                else
+                  echo "  Fixed file invalid, uploading original" >&2
+                  rm -f "$temp_file"
+                  echo "$input_file"; return 0
+                fi
+              }
 
-  if ! command -v ffmpeg &> /dev/null; then
-    echo "  ⚠️  ffmpeg not found, uploading .ts file as-is" >&2
-    echo "$input_file"
-    return 0
-  fi
+              upload_to_gofile() {
+                local file="$1" api_key="$2"
+                echo "  Uploading to Gofile..." >&2
+                local SERVER
+                SERVER=$(curl -s "https://api.gofile.io/servers" | jq -r '.data.servers[0].name' 2>/dev/null)
+                if [ -z "$SERVER" ] || [ "$SERVER" = "null" ]; then
+                  SERVER=$(curl -s "https://api.gofile.io/servers" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
+                fi
+                if [ -z "$SERVER" ]; then echo "  Failed to get Gofile server" >&2; return 1; fi
+                echo "  Using server: $SERVER" >&2
+                local RESPONSE DOWNLOAD_PAGE
+                RESPONSE=$(curl -s -F "file=@$file" -F "token=$api_key" "https://$SERVER.gofile.io/contents/uploadfile")
+                DOWNLOAD_PAGE=$(echo "$RESPONSE" | jq -r '.data.downloadPage' 2>/dev/null)
+                if [ -z "$DOWNLOAD_PAGE" ] || [ "$DOWNLOAD_PAGE" = "null" ]; then
+                  DOWNLOAD_PAGE=$(echo "$RESPONSE" | grep -o '"downloadPage":"[^"]*"' | cut -d'"' -f4)
+                fi
+                if [ -n "$DOWNLOAD_PAGE" ] && [ "$DOWNLOAD_PAGE" != "null" ]; then
+                  echo "  Gofile URL: $DOWNLOAD_PAGE" >&2
+                  echo "$DOWNLOAD_PAGE"; return 0
+                else
+                  echo "  Gofile upload failed. Response: $RESPONSE" >&2; return 1
+                fi
+              }
 
-  # FIX 2: check ffmpeg exit code directly, not via a grep pipe
-  if ! ffmpeg -nostdin -y -i "$input_file" -c copy -movflags +faststart "$output_file" 2>/dev/null; then
-    echo "  ⚠️  Conversion failed, uploading .ts file as-is" >&2
-    echo "$input_file"
-    return 0
-  fi
+              upload_to_filester() {
+                local file="$1" api_key="$2"
+                echo "  Uploading to Filester..." >&2
+                local RESPONSE HTTP_CODE
+                if [ -n "$api_key" ]; then
+                  RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
+                    -X POST "https://u1.filester.me/api/v1/upload" \
+                    -H "Authorization: Bearer $api_key" \
+                    -F "file=@$file")
+                else
+                  RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
+                    -X POST "https://u1.filester.me/api/v1/upload" \
+                    -F "file=@$file")
+                fi
+                HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+                RESPONSE=$(echo "$RESPONSE" | sed '/HTTP_CODE:/d')
+                echo "  HTTP Status: $HTTP_CODE" >&2
+                local SUCCESS SLUG
+                SUCCESS=$(echo "$RESPONSE" | jq -r '.success' 2>/dev/null)
+                SLUG=$(echo "$RESPONSE" | jq -r '.slug' 2>/dev/null)
+                if [ "$SUCCESS" = "true" ] && [ -n "$SLUG" ] && [ "$SLUG" != "null" ]; then
+                  local DOWNLOAD_URL="https://filester.me/d/$SLUG"
+                  echo "  Filester URL: $DOWNLOAD_URL" >&2
+                  echo "$DOWNLOAD_URL"; return 0
+                else
+                  local MSG; MSG=$(echo "$RESPONSE" | jq -r '.message' 2>/dev/null)
+                  echo "  Filester upload failed. Error: $MSG" >&2; return 1
+                fi
+              }
 
-  if [ -f "$output_file" ] && [ -s "$output_file" ]; then
-    echo "  ✅ Converted to MP4: $(du -h "$output_file" | cut -f1)" >&2
-    rm -f "$input_file"
-    echo "$output_file"
-    return 0
-  else
-    echo "  ⚠️  Output file invalid, uploading .ts file as-is" >&2
-    rm -f "$output_file"
-    echo "$input_file"
-    return 0
-  fi
-}
+              save_to_database() {
+                local filename="$1" gofile_url="$2" filester_url="$3" filesize="$4"
+                local CHANNEL TIMESTAMP DATE DB_FILE NEW_ENTRY TMP_FILE
+                CHANNEL=$(echo "$filename" | sed 's/_[0-9].*$//')
+                TIMESTAMP=$(echo "$filename" | sed 's/^.*_\([0-9-]*_[0-9-]*\)\..*$/\1/' | tr '_' ' ')
+                DATE=$(echo "$TIMESTAMP" | cut -d' ' -f1)
+                echo "  Saving to database: channel=$CHANNEL date=$DATE" >&2
+                mkdir -p "./database/$CHANNEL"
+                DB_FILE="./database/$CHANNEL/$DATE.json"
+                NEW_ENTRY=$(jq -n \
+                  --arg channel "$CHANNEL" \
+                  --arg timestamp "$TIMESTAMP" \
+                  --arg gofile_url "$gofile_url" \
+                  --arg filester_url "$filester_url" \
+                  --arg filesize "$filesize" \
+                  --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                  '{channel:$channel,timestamp:$timestamp,gofile_url:$gofile_url,filester_url:$filester_url,filesize:($filesize|tonumber),uploaded_at:$uploaded_at,source:"cached_recording"}')
+                if [ -f "$DB_FILE" ]; then
+                  TMP_FILE="${DB_FILE}.tmp"
+                  jq --argjson entry "$NEW_ENTRY" '. += [$entry]' "$DB_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$DB_FILE"
+                else
+                  echo "[$NEW_ENTRY]" | jq '.' > "$DB_FILE"
+                fi
+                echo "  DB entry added: $DB_FILE" >&2
+              }
 
-fix_mp4_streaming() {
-  local input_file="$1"
-  local temp_file="${input_file%.mp4}_fixed.mp4"
+              UPLOADED_COUNT=0
+              FAILED_COUNT=0
 
-  echo "  🔧 Fixing MP4 for streaming (moving moov atom to start)..." >&2
+              while IFS= read -r video; do
+                [ -f "$video" ] || continue
+                ORIGINAL_FILENAME=$(basename "$video")
+                echo ""
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "Processing: $ORIGINAL_FILENAME ($(du -h "$video" | cut -f1))"
+                echo ""
+                local PROCESSED_VIDEO
+                if [[ "$video" == *.ts ]]; then
+                  PROCESSED_VIDEO=$(convert_to_mp4 "$video")
+                elif [[ "$video" == *.mp4 ]]; then
+                  PROCESSED_VIDEO=$(fix_mp4_streaming "$video")
+                else
+                  PROCESSED_VIDEO="$video"
+                fi
+                FILENAME=$(basename "$PROCESSED_VIDEO")
+                FILESIZE=$(stat -c%s "$PROCESSED_VIDEO" 2>/dev/null || echo "0")
+                echo ""
+                echo "  Starting dual upload (Gofile + Filester)..."
+                local GOFILE_URL="" FILESTER_URL="" GOFILE_SUCCESS=1 FILESTER_SUCCESS=1
+                if [ -n "$GOFILE_API_KEY" ]; then
+                  GOFILE_URL=$(upload_to_gofile "$PROCESSED_VIDEO" "$GOFILE_API_KEY")
+                  GOFILE_SUCCESS=$?
+                fi
+                if [ -n "$FILESTER_API_KEY" ]; then
+                  FILESTER_URL=$(upload_to_filester "$PROCESSED_VIDEO" "$FILESTER_API_KEY")
+                  FILESTER_SUCCESS=$?
+                fi
+                if [ $GOFILE_SUCCESS -eq 0 ] || [ $FILESTER_SUCCESS -eq 0 ]; then
+                  [ -z "$GOFILE_URL" ] && GOFILE_URL="(upload failed)"
+                  [ -z "$FILESTER_URL" ] && FILESTER_URL="(upload failed)"
+                  save_to_database "$FILENAME" "$GOFILE_URL" "$FILESTER_URL" "$FILESIZE"
+                  rm -f "$PROCESSED_VIDEO"
+                  echo "  Done"
+                  UPLOADED_COUNT=$((UPLOADED_COUNT + 1))
+                  if [ $GOFILE_SUCCESS -ne 0 ] || [ $FILESTER_SUCCESS -ne 0 ]; then
+                    echo "  Warning: only partial upload succeeded"
+                  fi
+                else
+                  echo "  Both uploads failed, keeping local file"
+                  FAILED_COUNT=$((FAILED_COUNT + 1))
+                fi
+              done < <(find ./videos -type f \( -name '*.ts' -o -name '*.mp4' -o -name '*.mkv' \) 2>/dev/null)
 
-  if ! command -v ffmpeg &> /dev/null; then
-    echo "  ⚠️  ffmpeg not found, uploading MP4 as-is" >&2
-    echo "$input_file"
-    return 0
-  fi
-
-  # FIX 2: check ffmpeg exit code directly
-  if ! ffmpeg -nostdin -y -i "$input_file" -c copy -movflags +faststart "$temp_file" 2>/dev/null; then
-    echo "  ⚠️  Fix failed, uploading original MP4" >&2
-    rm -f "$temp_file"
-    echo "$input_file"
-    return 0
-  fi
-
-  if [ -f "$temp_file" ] && [ -s "$temp_file" ]; then
-    echo "  ✅ Fixed MP4 for streaming: $(du -h "$temp_file" | cut -f1)" >&2
-    mv "$temp_file" "$input_file"
-    echo "$input_file"
-    return 0
-  else
-    echo "  ⚠️  Fixed file invalid, uploading original MP4" >&2
-    rm -f "$temp_file"
-    echo "$input_file"
-    return 0
-  fi
-}
-
-upload_to_gofile() {
-  local file="$1"
-  local api_key="$2"
-
-  echo "  📤 Uploading to Gofile..." >&2
-
-  SERVER=$(curl -s "https://api.gofile.io/servers" | jq -r '.data.servers[0].name' 2>/dev/null)
-  if [ -z "$SERVER" ] || [ "$SERVER" = "null" ]; then
-    SERVER=$(curl -s "https://api.gofile.io/servers" | grep -o '"name":"[^"]*"' | head -1 | cut -d'"' -f4)
-  fi
-
-  if [ -z "$SERVER" ]; then
-    echo "  ❌ Failed to get Gofile server" >&2
-    return 1
-  fi
-
-  echo "     Using server: $SERVER" >&2
-
-  RESPONSE=$(curl -s -F "file=@$file" -F "token=$api_key" "https://$SERVER.gofile.io/contents/uploadfile")
-  DOWNLOAD_PAGE=$(echo "$RESPONSE" | jq -r '.data.downloadPage' 2>/dev/null)
-
-  if [ -z "$DOWNLOAD_PAGE" ] || [ "$DOWNLOAD_PAGE" = "null" ]; then
-    DOWNLOAD_PAGE=$(echo "$RESPONSE" | grep -o '"downloadPage":"[^"]*"' | cut -d'"' -f4)
-  fi
-
-  if [ -n "$DOWNLOAD_PAGE" ] && [ "$DOWNLOAD_PAGE" != "null" ]; then
-    echo "     ✅ Gofile URL: $DOWNLOAD_PAGE" >&2
-    echo "$DOWNLOAD_PAGE"
-    return 0
-  else
-    echo "     ❌ Upload failed" >&2
-    echo "     Response: $RESPONSE" >&2
-    return 1
-  fi
-}
-
-upload_to_filester() {
-  local file="$1"
-  local api_key="$2"
-
-  echo "  📤 Uploading to Filester..." >&2
-
-  if [ -n "$api_key" ]; then
-    RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
-      -X POST "https://u1.filester.me/api/v1/upload" \
-      -H "Authorization: Bearer $api_key" \
-      -F "file=@$file")
-  else
-    RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
-      -X POST "https://u1.filester.me/api/v1/upload" \
-      -F "file=@$file")
-  fi
-
-  HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
-  RESPONSE=$(echo "$RESPONSE" | sed '/HTTP_CODE:/d')
-
-  echo "     HTTP Status: $HTTP_CODE" >&2
-
-  SUCCESS=$(echo "$RESPONSE" | jq -r '.success' 2>/dev/null)
-  SLUG=$(echo "$RESPONSE" | jq -r '.slug' 2>/dev/null)
-
-  if [ "$SUCCESS" = "true" ] && [ -n "$SLUG" ] && [ "$SLUG" != "null" ]; then
-    DOWNLOAD_URL="https://filester.me/d/$SLUG"
-    echo "     ✅ Filester URL: $DOWNLOAD_URL" >&2
-    echo "$DOWNLOAD_URL"
-    return 0
-  else
-    echo "     ❌ Upload failed" >&2
-    MESSAGE=$(echo "$RESPONSE" | jq -r '.message' 2>/dev/null)
-    echo "     Error: $MESSAGE" >&2
-    echo "     Response: $RESPONSE" >&2
-    return 1
-  fi
-}
-
-save_to_database() {
-  local filename="$1"
-  local gofile_url="$2"
-  local filester_url="$3"
-  local filesize="$4"
-
-  CHANNEL=$(echo "$filename" | sed 's/_[0-9].*$//')
-  TIMESTAMP=$(echo "$filename" | sed 's/^.*_\([0-9-]*_[0-9-]*\)\..*$/\1/' | tr '_' ' ')
-  DATE=$(echo "$TIMESTAMP" | cut -d' ' -f1)
-
-  echo "  💾 Saving to database..." >&2
-  echo "     Channel: $CHANNEL" >&2
-  echo "     Date: $DATE" >&2
-  echo "     Gofile URL: $gofile_url" >&2
-  echo "     Filester URL: $filester_url" >&2
-
-  mkdir -p "./database/$CHANNEL"
-  DB_FILE="./database/$CHANNEL/$DATE.json"
-
-  NEW_ENTRY=$(jq -n \
-    --arg channel "$CHANNEL" \
-    --arg timestamp "$TIMESTAMP" \
-    --arg gofile_url "$gofile_url" \
-    --arg filester_url "$filester_url" \
-    --arg filesize "$filesize" \
-    --arg uploaded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '{
-      channel: $channel,
-      timestamp: $timestamp,
-      gofile_url: $gofile_url,
-      filester_url: $filester_url,
-      filesize: ($filesize | tonumber),
-      uploaded_at: $uploaded_at,
-      source: "cached_recording"
-    }'
-  )
-
-  if [ -f "$DB_FILE" ]; then
-    TMP_FILE="${DB_FILE}.tmp"
-    jq --argjson entry "$NEW_ENTRY" '. += [$entry]' "$DB_FILE" > "$TMP_FILE" && mv "$TMP_FILE" "$DB_FILE"
-  else
-    echo "[$NEW_ENTRY]" | jq '.' > "$DB_FILE"
-  fi
-
-  echo "  ✅ Database entry added to: $DB_FILE" >&2
-}
-
-UPLOADED_COUNT=0
-FAILED_COUNT=0
-
-# FIX 5: use find+while instead of ** glob (which requires shopt -s globstar)
-while IFS= read -r video; do
-  [ -f "$video" ] || continue
-
-  ORIGINAL_FILENAME=$(basename "$video")
-
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "📼 Processing: $ORIGINAL_FILENAME"
-  echo "   Original size: $(du -h "$video" | cut -f1)"
-  echo ""
-
-  if [[ "$video" == *.ts ]]; then
-    PROCESSED_VIDEO=$(convert_to_mp4 "$video")
-  elif [[ "$video" == *.mp4 ]]; then
-    PROCESSED_VIDEO=$(fix_mp4_streaming "$video")
-  else
-    PROCESSED_VIDEO="$video"
-  fi
-
-  FILENAME=$(basename "$PROCESSED_VIDEO")
-  FILESIZE=$(stat -c%s "$PROCESSED_VIDEO" 2>/dev/null || stat -f%z "$PROCESSED_VIDEO" 2>/dev/null || echo "0")
-
-  echo ""
-  echo "  📤 Starting dual upload (Gofile + Filester)..."
-
-  GOFILE_URL=""
-  FILESTER_URL=""
-
-  if [ -n "$GOFILE_API_KEY" ]; then
-    GOFILE_URL=$(upload_to_gofile "$PROCESSED_VIDEO" "$GOFILE_API_KEY")
-    GOFILE_SUCCESS=$?
-  else
-    echo "  ⚠️  Gofile API key not configured"
-    GOFILE_SUCCESS=1
-  fi
-
-  if [ -n "$FILESTER_API_KEY" ]; then
-    FILESTER_URL=$(upload_to_filester "$PROCESSED_VIDEO" "$FILESTER_API_KEY")
-    FILESTER_SUCCESS=$?
-  else
-    echo "  ⚠️  Filester API key not configured"
-    FILESTER_SUCCESS=1
-  fi
-
-  if [ $GOFILE_SUCCESS -eq 0 ] || [ $FILESTER_SUCCESS -eq 0 ]; then
-    echo ""
-    [ -z "$GOFILE_URL" ] && GOFILE_URL="(upload failed)"
-    [ -z "$FILESTER_URL" ] && FILESTER_URL="(upload failed)"
-
-    save_to_database "$FILENAME" "$GOFILE_URL" "$FILESTER_URL" "$FILESIZE"
-    echo ""
-    echo "  🗑️  Deleting local file (at least one upload succeeded)..."
-    rm -f "$PROCESSED_VIDEO"
-    echo "  ✅ Processing complete"
-    UPLOADED_COUNT=$((UPLOADED_COUNT + 1))
-
-    if [ $GOFILE_SUCCESS -ne 0 ] || [ $FILESTER_SUCCESS -ne 0 ]; then
-      echo "  ⚠️  Warning: Only partial upload succeeded"
-    fi
-  else
-    echo ""
-    echo "  ❌ Both uploads failed, keeping local file"
-    FAILED_COUNT=$((FAILED_COUNT + 1))
-  fi
-done < <(find ./videos -type f \( -name '*.ts' -o -name '*.mp4' -o -name '*.mkv' \) 2>/dev/null)
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📊 Summary:"
-echo "   ✅ Uploaded: $UPLOADED_COUNT"
-echo "   ❌ Failed: $FAILED_COUNT"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-PROCESS_SCRIPT
-
-              chmod +x process_cached_recordings.sh
-              bash process_cached_recordings.sh
+              echo ""
+              echo "Summary: uploaded=$UPLOADED_COUNT failed=$FAILED_COUNT"
 
               echo ""
               echo "✅ Cached recordings processed"
