@@ -101,6 +101,92 @@ func CreateTransport() *http.Transport {
 	return newTransport
 }
 
+// Post sends an HTTP POST request with form data and returns the response as a string.
+func (h *Req) Post(ctx context.Context, url string, data string) (string, error) {
+	// Use CycleTLS if enabled (GitHub Actions mode)
+	if h.useCycle {
+		return h.PostWithCycleTLS(ctx, url, data)
+	}
+	
+	// Standard HTTP client path
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("new request: %w", err)
+	}
+	
+	// Set content type for form data
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.SetRequestHeaders(req)
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("client do: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if server.Config.Debug && resp.StatusCode >= 400 {
+		fmt.Printf("[DEBUG] HTTP %d: %s\n", resp.StatusCode, req.URL)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", ErrNotFound
+	}
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read body: %w", err)
+	}
+
+	return string(b), nil
+}
+
+// PostWithCycleTLS sends an HTTP POST request using CycleTLS.
+func (h *Req) PostWithCycleTLS(ctx context.Context, url string, data string) (string, error) {
+	// Build headers map
+	headers := make(map[string]string)
+	headers["Content-Type"] = "application/x-www-form-urlencoded"
+	headers["X-Requested-With"] = "XMLHttpRequest"
+	headers["Referer"] = "https://chaturbate.com/"
+	
+	if server.Config.UserAgent != "" {
+		headers["User-Agent"] = server.Config.UserAgent
+	}
+	
+	if server.Config.Cookies != "" {
+		cookieStr := strings.TrimSpace(server.Config.Cookies)
+		headers["Cookie"] = cookieStr
+		
+		cookies := ParseCookies(cookieStr)
+		if csrfToken, ok := cookies["csrftoken"]; ok {
+			headers["X-CSRFToken"] = csrfToken
+		}
+	}
+	
+	fmt.Printf("[DEBUG] CycleTLS POST URL: %s\n", url)
+	fmt.Printf("[DEBUG] CycleTLS POST data: %s\n", data)
+	
+	response, err := h.cycleTLS.Do(url, cycletls.Options{
+		Body:      data,
+		Ja3:       "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0",
+		UserAgent: server.Config.UserAgent,
+		Headers:   headers,
+		Timeout:   10,
+	}, "POST")
+	
+	if err != nil {
+		return "", fmt.Errorf("cycletls post: %w", err)
+	}
+	
+	if response.Status >= 400 {
+		fmt.Printf("[DEBUG] HTTP %d: %s\n", response.Status, url)
+	}
+	
+	return response.Body, nil
+}
+
 // Get sends an HTTP GET request and returns the response as a string.
 func (h *Req) Get(ctx context.Context, url string) (string, error) {
 	// FlareSolverr is NOT used for API endpoints

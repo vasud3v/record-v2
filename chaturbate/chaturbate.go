@@ -91,39 +91,65 @@ type apiResponse struct {
 }
 
 func FetchStream(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
-	// When using FlareSolverr, skip homepage/room visits since FlareSolverr already established the session
-	// The cookies from FlareSolverr should be sufficient
-	if !internal.IsFlareSolverrEnabled() {
-		// IMPORTANT: Visit the homepage first to accept age verification
-		// Then visit the room page to establish session
-		// Chaturbate's API requires this to return hls_source for public streams
-		homeURL := strings.TrimSuffix(server.Config.Domain, "/")
-		fmt.Printf("[DEBUG] %s: Visiting homepage to establish session: %s\n", username, homeURL)
-		_, err := client.Get(ctx, homeURL)
-		if err != nil {
-			// Homepage visit can fail with age verification, but that's OK
-			// The cookies should handle it
-			fmt.Printf("[DEBUG] %s: Homepage visit had issue (continuing): %v\n", username, err)
-		} else {
-			fmt.Printf("[DEBUG] %s: Homepage visit successful\n", username)
-		}
-		
-		// Now visit the specific room page
-		roomURL := fmt.Sprintf("%s%s/", server.Config.Domain, username)
-		fmt.Printf("[DEBUG] %s: Visiting room page: %s\n", username, roomURL)
-		roomBody, err := client.Get(ctx, roomURL)
-		if err != nil {
-			fmt.Printf("[WARN] %s: Room page visit failed: %v\n", username, err)
-		} else {
-			fmt.Printf("[DEBUG] %s: Room page visit successful (body length: %d)\n", username, len(roomBody))
-			// Check if we're getting age verification page
-			if strings.Contains(roomBody, "Verify your age") {
-				fmt.Printf("[ERROR] %s: Age verification page detected - cookies may not be working\n", username)
-			}
-		}
-	} else {
-		fmt.Printf("[DEBUG] %s: Skipping homepage/room visits (using FlareSolverr session)\n", username)
+	fmt.Printf("[DEBUG] %s: Using alternative HLS API endpoint\n", username)
+	
+	// Use the /get_edge_hls_url_ajax/ endpoint which works better with automated tools
+	// This endpoint doesn't require the same level of age verification as /api/chatvideocontext/
+	// Source: https://gist.github.com/mywalkb/1c9a26a59018cf1af40eb2fe0e8dea33
+	
+	apiURL := fmt.Sprintf("%sget_edge_hls_url_ajax/", server.Config.Domain)
+	fmt.Printf("[DEBUG] %s: Calling HLS API: %s\n", username, apiURL)
+	
+	// This endpoint requires POST with form data
+	postData := fmt.Sprintf("room_slug=%s&bandwidth=high", username)
+	
+	body, err := client.Post(ctx, apiURL, postData)
+	if err != nil {
+		fmt.Printf("[ERROR] %s: HLS API call failed: %v\n", username, err)
+		// Fallback to old API
+		return fetchStreamLegacy(ctx, client, username)
 	}
+	
+	fmt.Printf("[DEBUG] %s: HLS API response received (length: %d)\n", username, len(body))
+
+	// Parse response from HLS endpoint
+	var hlsResp struct {
+		RoomStatus string `json:"room_status"`
+		URL        string `json:"url"`
+		Success    bool   `json:"success"`
+	}
+	
+	if err := json.Unmarshal([]byte(body), &hlsResp); err != nil {
+		fmt.Printf("[ERROR] %s: Failed to parse HLS API response: %v\n", username, err)
+		// Fallback to old API
+		return fetchStreamLegacy(ctx, client, username)
+	}
+	
+	fmt.Printf("[INFO] %s: HLS API Response - room_status=%q, url_present=%v, success=%v\n", 
+		username, hlsResp.RoomStatus, hlsResp.URL != "", hlsResp.Success)
+
+	meta := &Stream{}
+	
+	if hlsResp.Success && hlsResp.URL != "" {
+		meta.HLSSource = hlsResp.URL
+		return meta, nil
+	}
+
+	switch hlsResp.RoomStatus {
+	case "private":
+		return meta, internal.ErrPrivateStream
+	case "hidden":
+		return meta, internal.ErrHiddenStream
+	case "offline":
+		return meta, internal.ErrChannelOffline
+	default:
+		return meta, internal.ErrChannelOffline
+	}
+}
+
+// fetchStreamLegacy is the original implementation using /api/chatvideocontext/
+func fetchStreamLegacy(ctx context.Context, client *internal.Req, username string) (*Stream, error) {
+	fmt.Printf("[DEBUG] %s: Falling back to legacy API\n", username)
 	
 	apiURL := fmt.Sprintf("%sapi/chatvideocontext/%s/", server.Config.Domain, username)
 	fmt.Printf("[DEBUG] %s: Calling API: %s\n", username, apiURL)
