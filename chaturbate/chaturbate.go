@@ -212,6 +212,15 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 		// If we can't find initialRoomDossier, the channel is likely offline
 		// or the page structure has changed
 		fmt.Printf("[INFO] %s: Could not parse initialRoomDossier: %v\n", username, err)
+		
+		// Save HTML to file for debugging (only in CI mode)
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			debugFile := fmt.Sprintf("/tmp/chaturbate_debug_%s_%d.html", cleanUsername, time.Now().Unix())
+			if err := os.WriteFile(debugFile, []byte(htmlBody), 0644); err == nil {
+				fmt.Printf("[DEBUG] %s: Saved HTML to %s for debugging\n", username, debugFile)
+			}
+		}
+		
 		return &Stream{}, internal.ErrChannelOffline
 	}
 
@@ -223,19 +232,51 @@ func fetchStreamViaFlareSolverr(ctx context.Context, username string) (*Stream, 
 func parseInitialRoomDossier(html, username string) (*Stream, error) {
 	// Look for: window.initialRoomDossier = "...";
 	// The value is a JSON string that's been escaped (quotes, unicode)
-	const marker = "window.initialRoomDossier = \""
-
-	startIdx := strings.Index(html, marker)
-	if startIdx == -1 {
-		// Try alternate format without window prefix
-		const altMarker = "initialRoomDossier = \""
-		startIdx = strings.Index(html, altMarker)
-		if startIdx == -1 {
-			return nil, fmt.Errorf("initialRoomDossier not found in HTML")
+	
+	// Try multiple patterns in order of likelihood
+	patterns := []string{
+		"window.initialRoomDossier = \"",
+		"initialRoomDossier = \"",
+		"window.initialRoomDossier=\"",
+		"initialRoomDossier=\"",
+		"\"initialRoomDossier\":\"", // JSON format
+	}
+	
+	startIdx := -1
+	
+	for _, pattern := range patterns {
+		idx := strings.Index(html, pattern)
+		if idx != -1 {
+			startIdx = idx + len(pattern)
+			fmt.Printf("[DEBUG] %s: Found initialRoomDossier using pattern: %q\n", username, pattern)
+			break
 		}
-		startIdx += len(altMarker)
-	} else {
-		startIdx += len(marker)
+	}
+	
+	if startIdx == -1 {
+		// Debug: Show what we're actually getting
+		fmt.Printf("[DEBUG] %s: HTML length: %d bytes\n", username, len(html))
+		
+		// Check if we got a Cloudflare challenge page
+		if strings.Contains(html, "cf-challenge") || strings.Contains(html, "Checking your browser") {
+			fmt.Printf("[ERROR] %s: Received Cloudflare challenge page - cookies may be invalid\n", username)
+			return nil, fmt.Errorf("cloudflare challenge detected - check cookies")
+		}
+		
+		// Check if we got an error page
+		if strings.Contains(html, "404") || strings.Contains(html, "Not Found") {
+			fmt.Printf("[ERROR] %s: Received 404 page - channel may not exist\n", username)
+			return nil, fmt.Errorf("channel not found (404)")
+		}
+		
+		// Show a snippet of what we got
+		snippet := html
+		if len(snippet) > 1000 {
+			snippet = snippet[:1000]
+		}
+		fmt.Printf("[DEBUG] %s: HTML snippet (first 1000 chars): %s\n", username, snippet)
+		
+		return nil, fmt.Errorf("initialRoomDossier not found in HTML (tried %d patterns)", len(patterns))
 	}
 
 	// Find the closing quote - it's escaped JSON inside a string literal
