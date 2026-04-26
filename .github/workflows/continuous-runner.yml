@@ -232,6 +232,13 @@ jobs:
             echo "No job state cache found, starting fresh"
           fi
       
+      - name: Build application
+        run: |
+          echo "🔨 Building GoondVR binary..."
+          go build -o goondvr main.go
+          chmod +x goondvr
+          echo "✅ Build complete"
+      
       - name: Start recording with cancellation safety
         env:
           GOFILE_API_KEY: ${{ secrets.GOFILE_API_KEY }}
@@ -271,9 +278,9 @@ jobs:
             echo "✅ Using proxy: ${HTTPS_PROXY:0:30}..."
           fi
           
-          # Start recording with GitHub Actions mode
-          # The application now includes emergency shutdown handling for cancellations
-          go run main.go \
+          # Start recording with GitHub Actions mode using the compiled binary
+          # Using the binary instead of 'go run' ensures proper signal handling
+          ./goondvr \
             --mode github-actions \
             --matrix-job-id $MATRIX_JOB_ID \
             --session-id $SESSION_ID \
