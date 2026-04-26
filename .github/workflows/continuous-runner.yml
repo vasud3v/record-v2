@@ -245,6 +245,42 @@ jobs:
             fi
           }
           
+          fix_mp4_streaming() {
+            local input_file="$1"
+            local temp_file="${input_file%.mp4}_fixed.mp4"
+            
+            echo "  🔧 Fixing MP4 for streaming (moving moov atom to start)..."
+            
+            # Check if ffmpeg is available
+            if ! command -v ffmpeg &> /dev/null; then
+              echo "  ⚠️  ffmpeg not found, uploading MP4 as-is"
+              echo "$input_file"
+              return 0
+            fi
+            
+            # Fix MP4 with faststart flag (moves moov atom to beginning)
+            if ffmpeg -nostdin -y -i "$input_file" -c copy -movflags +faststart "$temp_file" 2>&1 | grep -q "error\|Error"; then
+              echo "  ⚠️  Fix failed, uploading original MP4"
+              rm -f "$temp_file"
+              echo "$input_file"
+              return 0
+            fi
+            
+            # Verify output file was created and is not empty
+            if [ -f "$temp_file" ] && [ -s "$temp_file" ]; then
+              echo "  ✅ Fixed MP4 for streaming: $(du -h "$temp_file" | cut -f1)"
+              # Replace original with fixed version
+              mv "$temp_file" "$input_file"
+              echo "$input_file"
+              return 0
+            else
+              echo "  ⚠️  Fixed file invalid, uploading original MP4"
+              rm -f "$temp_file"
+              echo "$input_file"
+              return 0
+            fi
+          }
+          
           upload_to_gofile() {
             local file="$1"
             local api_key="$2"
@@ -293,35 +329,38 @@ jobs:
             
             echo "  📤 Uploading to Filester..."
             
-            # Get upload URL
-            UPLOAD_RESPONSE=$(curl -s -X POST "https://filester.me/api/upload/server?key=$api_key")
-            UPLOAD_URL=$(echo "$UPLOAD_RESPONSE" | jq -r '.result.url' 2>/dev/null)
-            
-            if [ -z "$UPLOAD_URL" ] || [ "$UPLOAD_URL" = "null" ]; then
-              echo "     ❌ Failed to get Filester upload URL"
-              echo "     Response: $UPLOAD_RESPONSE"
-              return 1
+            # New Filester API v1 - direct upload with Bearer token
+            if [ -n "$api_key" ]; then
+              RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
+                -X POST "https://u1.filester.me/api/v1/upload" \
+                -H "Authorization: Bearer $api_key" \
+                -F "file=@$file")
+            else
+              # Guest upload (no authentication)
+              RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" \
+                -X POST "https://u1.filester.me/api/v1/upload" \
+                -F "file=@$file")
             fi
             
-            echo "     Using upload URL: ${UPLOAD_URL:0:50}..."
+            HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+            RESPONSE=$(echo "$RESPONSE" | sed '/HTTP_CODE:/d')
             
-            # Upload file
-            RESPONSE=$(curl -s -F "file=@$file" "$UPLOAD_URL")
+            echo "     HTTP Status: $HTTP_CODE"
             
-            # Extract download URL
-            DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.result.url' 2>/dev/null)
+            # Extract data from new API response format
+            SUCCESS=$(echo "$RESPONSE" | jq -r '.success' 2>/dev/null)
+            SLUG=$(echo "$RESPONSE" | jq -r '.slug' 2>/dev/null)
             
-            if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
-              # Fallback: try to extract URL differently
-              DOWNLOAD_URL=$(echo "$RESPONSE" | grep -o '"url":"[^"]*"' | head -1 | cut -d'"' -f4)
-            fi
-            
-            if [ -n "$DOWNLOAD_URL" ] && [ "$DOWNLOAD_URL" != "null" ]; then
+            if [ "$SUCCESS" = "true" ] && [ -n "$SLUG" ] && [ "$SLUG" != "null" ]; then
+              # Construct download URL from slug
+              DOWNLOAD_URL="https://filester.me/d/$SLUG"
               echo "     ✅ Filester URL: $DOWNLOAD_URL"
               echo "$DOWNLOAD_URL"
               return 0
             else
               echo "     ❌ Upload failed"
+              MESSAGE=$(echo "$RESPONSE" | jq -r '.message' 2>/dev/null)
+              echo "     Error: $MESSAGE"
               echo "     Response: $RESPONSE"
               return 1
             fi
@@ -402,9 +441,11 @@ jobs:
             echo "   Original size: $(du -h "$video" | cut -f1)"
             echo ""
             
-            # Convert .ts to .mp4 if needed
+            # Convert .ts to .mp4 if needed, or fix .mp4 for streaming
             if [[ "$video" == *.ts ]]; then
               PROCESSED_VIDEO=$(convert_to_mp4 "$video")
+            elif [[ "$video" == *.mp4 ]]; then
+              PROCESSED_VIDEO=$(fix_mp4_streaming "$video")
             else
               PROCESSED_VIDEO="$video"
             fi
@@ -894,19 +935,25 @@ jobs:
               
               # Upload to Filester with timeout (2 minutes max)
               if [ -n "$FILESTER_API_KEY" ]; then
-                echo "    Uploading to Files.catbox.moe..."
-                UPLOAD_RESPONSE=$(timeout 10s curl -s -X POST "https://filester.me/api/upload/server?key=$FILESTER_API_KEY" 2>/dev/null || echo "")
-                UPLOAD_URL=$(echo "$UPLOAD_RESPONSE" | jq -r '.result.url' 2>/dev/null || echo "")
-                if [ -n "$UPLOAD_URL" ] && [ "$UPLOAD_URL" != "null" ]; then
-                  RESPONSE=$(timeout 120s curl -s -F "file=@$video" "$UPLOAD_URL" 2>/dev/null || echo "")
-                  FILESTER_URL=$(echo "$RESPONSE" | jq -r '.result.url' 2>/dev/null || echo "")
-                  if [ -n "$FILESTER_URL" ] && [ "$FILESTER_URL" != "null" ]; then
-                    echo "    ✅ Filester: $FILESTER_URL"
-                  else
-                    echo "    ❌ Filester upload failed or timed out"
-                  fi
+                echo "    Uploading to Filester..."
+                RESPONSE=$(timeout 120s curl -s -w "\nHTTP_CODE:%{http_code}" \
+                  -X POST "https://u1.filester.me/api/v1/upload" \
+                  -H "Authorization: Bearer $FILESTER_API_KEY" \
+                  -F "file=@$video" 2>/dev/null || echo "")
+                HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+                RESPONSE=$(echo "$RESPONSE" | sed '/HTTP_CODE:/d')
+                echo "    HTTP Status: $HTTP_CODE"
+                
+                SUCCESS=$(echo "$RESPONSE" | jq -r '.success' 2>/dev/null || echo "")
+                SLUG=$(echo "$RESPONSE" | jq -r '.slug' 2>/dev/null || echo "")
+                
+                if [ "$SUCCESS" = "true" ] && [ -n "$SLUG" ] && [ "$SLUG" != "null" ]; then
+                  FILESTER_URL="https://filester.me/d/$SLUG"
+                  echo "    ✅ Filester: $FILESTER_URL"
                 else
-                  echo "    ❌ Could not get Filester upload URL"
+                  echo "    ❌ Filester upload failed or timed out"
+                  MESSAGE=$(echo "$RESPONSE" | jq -r '.message' 2>/dev/null || echo "")
+                  [ -n "$MESSAGE" ] && echo "    Error: $MESSAGE"
                 fi
               fi
               
