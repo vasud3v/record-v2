@@ -576,33 +576,3 @@ jobs:
           EOF
           
           echo "Status file created for job ${{ matrix.job.id }}"
-
-  summary:
-    name: Workflow Summary
-    needs: [validate, record]
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Generate summary
-        run: |
-          echo "## GoondVR Continuous Runner Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Session ID:** ${{ needs.validate.outputs.session_id }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Matrix Jobs:** ${{ needs.validate.outputs.validated_matrix_count }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Channels:** ${{ needs.validate.outputs.channels }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Status:** ${{ needs.record.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### System Features" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Maximum quality enabled (up to 4K 60fps)" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Dual upload to Gofile and Filester" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Auto-restart every 5.5 hours" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ State persistence across runs" >> $GITHUB_STEP_SUMMARY
-          echo "- 🛡️ **Cancellation safety enabled** - recordings saved even when cancelled" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 💡 Cancellation Safety" >> $GITHUB_STEP_SUMMARY
-          echo "If you cancelled this workflow:" >> $GITHUB_STEP_SUMMARY
-          echo "1. Check the job logs for '✅ Emergency shutdown complete'" >> $GITHUB_STEP_SUMMARY
-          echo "2. Recordings are uploaded to Gofile/Filester automatically" >> $GITHUB_STEP_SUMMARY
-          echo "3. Fallback: Download from Artifacts section below" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "📚 [Cancellation Safety Guide](https://github.com/${{ github.repository }}/blob/main/docs/QUICK_CANCELLATION_GUIDE.md)" >> $GITHUB_STEP_SUMMARY
