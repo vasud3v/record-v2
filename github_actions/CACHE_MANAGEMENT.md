@@ -39,21 +39,27 @@ The workflow now uses better cache keys to prevent accumulation:
 **Old Strategy (BAD):**
 ```yaml
 key: state-pending-upload-
-```
-- All runs shared the same cache
-- Caches accumulated over time
-- Hit 10 GB limit quickly
-
-**New Strategy (GOOD):**
-```yaml
-key: state-pending-upload-${{ needs.validate.outputs.session_id }}-${{ github.run_id }}-job-${{ matrix.job.id }}
 restore-keys: |
   state-pending-upload-${{ needs.validate.outputs.session_id }}-
   state-pending-upload-
 ```
-- Each workflow run has unique cache
-- Old caches can be safely deleted
-- Better isolation between runs
+- All matrix jobs shared the same cache
+- Job 2 would restore Job 1's cache instead of its own
+- Caches accumulated and mixed between jobs
+- Hit 10 GB limit quickly
+
+**New Strategy (GOOD):**
+```yaml
+key: state-pending-upload-${{ github.run_id }}-job-${{ matrix.job.id }}-never-match
+restore-keys: |
+  state-pending-upload-${{ github.run_id }}-job-${{ matrix.job.id }}-
+  state-pending-upload-job-${{ matrix.job.id }}-
+```
+- Each matrix job has its own isolated cache
+- Job 1 only restores Job 1's previous cache
+- Job 2 only restores Job 2's previous cache
+- Better isolation between jobs and runs
+- Prevents cache collision in matrix workflows
 
 ## Cache Usage Patterns
 
@@ -214,9 +220,10 @@ gh cache delete --all
 - Use maximum compression
 
 ### 2. Smart Cache Keys
-- Include session ID for isolation
-- Use run ID for uniqueness
-- Add job ID for matrix jobs
+- Include run ID for workflow isolation
+- **Include job ID for matrix job isolation** (critical!)
+- Use job ID in restore-keys to prevent cross-job cache pollution
+- Each matrix job maintains its own cache history
 
 ### 3. Aggressive Cleanup
 - Delete caches older than 5 days

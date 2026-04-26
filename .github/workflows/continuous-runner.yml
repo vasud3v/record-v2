@@ -152,12 +152,12 @@ jobs:
             ./videos
             ./state
             ./partial
-          # BUG 4 FIX: Include session ID in cache key to prevent collision between different workflow runs
-          # This ensures each workflow run has isolated cache state
-          key: state-pending-upload-${{ needs.validate.outputs.session_id }}-${{ github.run_id }}-job-${{ matrix.job.id }}-never-match
+          # Each job gets its own cache by including job ID in the key
+          # This ensures Job 1 only restores Job 1's previous cache, Job 2 only restores Job 2's cache, etc.
+          key: state-pending-upload-${{ github.run_id }}-job-${{ matrix.job.id }}-never-match
           restore-keys: |
-            state-pending-upload-${{ needs.validate.outputs.session_id }}-
-            state-pending-upload-
+            state-pending-upload-${{ github.run_id }}-job-${{ matrix.job.id }}-
+            state-pending-upload-job-${{ matrix.job.id }}-
       
       - name: Upload cached recordings from previous run
         if: always()
