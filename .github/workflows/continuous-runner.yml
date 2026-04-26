@@ -40,7 +40,6 @@ jobs:
           echo "Reading channels from .github/workflows/channels.txt..."
           # Read non-empty lines that don't start with # and join with commas
           CHANNELS_LIST=$(grep -v '^[[:space:]]*#' .github/workflows/channels.txt | grep -v '^[[:space:]]*$' | tr -d '\r' | paste -sd "," -)
-          fi
           
           if [ -z "$CHANNELS_LIST" ]; then
             echo "Error: No channels found in .github/workflows/channels.txt"

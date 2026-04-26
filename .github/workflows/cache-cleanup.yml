@@ -1,0 +1,146 @@
+name: Cache Cleanup
+
+# Automatically clean up old caches to prevent hitting the 10 GB limit
+# Runs daily and can be triggered manually
+
+on:
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        description: 'Delete caches older than X days'
+        required: false
+        default: '7'
+        type: string
+
+permissions:
+  actions: write  # Required to delete caches
+
+jobs:
+  cleanup:
+    name: Clean Up Old Caches
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Clean up old caches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🧹 Starting cache cleanup..."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Get max age from input or default to 7 days
+          MAX_AGE_DAYS="${{ inputs.max_age_days || '7' }}"
+          echo "Max cache age: $MAX_AGE_DAYS days"
+          echo ""
+          
+          # Calculate cutoff date (X days ago)
+          if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS
+            CUTOFF_DATE=$(date -u -v-${MAX_AGE_DAYS}d +%Y-%m-%dT%H:%M:%SZ)
+          else
+            # Linux
+            CUTOFF_DATE=$(date -u -d "$MAX_AGE_DAYS days ago" +%Y-%m-%dT%H:%M:%SZ)
+          fi
+          
+          echo "Cutoff date: $CUTOFF_DATE"
+          echo "Caches older than this will be deleted"
+          echo ""
+          
+          # Get current cache usage
+          echo "📊 Current cache usage:"
+          gh cache list --limit 100 | head -20
+          echo ""
+          
+          # Count total caches
+          TOTAL_CACHES=$(gh cache list --json id | jq '. | length')
+          echo "Total caches: $TOTAL_CACHES"
+          echo ""
+          
+          if [ "$TOTAL_CACHES" -eq 0 ]; then
+            echo "✅ No caches found - nothing to clean up"
+            exit 0
+          fi
+          
+          # Delete old caches
+          echo "🗑️  Deleting caches older than $MAX_AGE_DAYS days..."
+          DELETED_COUNT=0
+          
+          # Get all cache IDs and created dates
+          gh cache list --json id,createdAt,key,sizeInBytes --limit 1000 | \
+            jq -r '.[] | select(.createdAt < "'$CUTOFF_DATE'") | .id' | \
+            while read -r cache_id; do
+              if [ -n "$cache_id" ]; then
+                echo "Deleting cache ID: $cache_id"
+                gh cache delete "$cache_id" || echo "Failed to delete cache $cache_id"
+                DELETED_COUNT=$((DELETED_COUNT + 1))
+              fi
+            done
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ Cache cleanup complete"
+          echo "Deleted: $DELETED_COUNT caches"
+          echo ""
+          
+          # Show remaining caches
+          REMAINING_CACHES=$(gh cache list --json id | jq '. | length')
+          echo "📊 Remaining caches: $REMAINING_CACHES"
+          
+          if [ "$REMAINING_CACHES" -gt 0 ]; then
+            echo ""
+            echo "Top 10 remaining caches:"
+            gh cache list --limit 10
+          fi
+      
+      - name: Check cache storage usage
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 Cache Storage Summary"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+          # Calculate total cache size
+          TOTAL_SIZE=$(gh cache list --json sizeInBytes --limit 1000 | \
+            jq '[.[].sizeInBytes] | add // 0')
+          
+          # Convert to GB
+          TOTAL_SIZE_GB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024 / 1024" | bc)
+          
+          echo "Total cache size: ${TOTAL_SIZE_GB} GB / 10 GB"
+          
+          # Calculate percentage
+          PERCENTAGE=$(echo "scale=1; $TOTAL_SIZE_GB * 100 / 10" | bc)
+          echo "Usage: ${PERCENTAGE}%"
+          
+          # Warn if approaching limit
+          if (( $(echo "$TOTAL_SIZE_GB > 8" | bc -l) )); then
+            echo ""
+            echo "⚠️  WARNING: Cache usage is high (${TOTAL_SIZE_GB} GB / 10 GB)"
+            echo "Consider running cleanup more frequently or reducing cache retention"
+          elif (( $(echo "$TOTAL_SIZE_GB > 9" | bc -l) )); then
+            echo ""
+            echo "🚨 CRITICAL: Cache usage is very high (${TOTAL_SIZE_GB} GB / 10 GB)"
+            echo "Immediate cleanup recommended!"
+          else
+            echo ""
+            echo "✅ Cache usage is healthy (${TOTAL_SIZE_GB} GB / 10 GB)"
+          fi
+          
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Cache Cleanup Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Cleanup completed successfully" >> $GITHUB_STEP_SUMMARY
+          echo "- 📅 Deleted caches older than ${{ inputs.max_age_days || '7' }} days" >> $GITHUB_STEP_SUMMARY
+          echo "- 📊 Check logs for detailed cache usage statistics" >> $GITHUB_STEP_SUMMARY
