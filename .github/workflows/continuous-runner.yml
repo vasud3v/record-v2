@@ -596,12 +596,15 @@ jobs:
           BG_PID=$!
 
           GOONDVR_EXIT=0
+          # Interval: Check if channel is online every N minutes when offline
+          # - Lower values (1-2 min) = more responsive but uses more resources
+          # - Higher values (5-10 min) = more cost-effective but less responsive
+          # - After stream ends, always retries in 10 seconds regardless of interval
           timeout --signal=TERM ${MAX_RECORD_SECS}s ./goondvr \
             --mode          github-actions \
             --matrix-job-id "$MATRIX_JOB_ID" \
             --session-id    "$SESSION_ID" \
             --channels      "$CHANNELS" \
-            --quality       best \
             --interval      1 \
             || GOONDVR_EXIT=$?
 
