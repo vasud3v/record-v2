@@ -289,28 +289,41 @@ jobs:
 
           ts_to_mp4() {
             local src="$1" dst="${1%.ts}.mp4" tmp="${1%.ts}_conv.mp4"
-            # Use temp file to avoid partial writes
-            # CRITICAL FIX: Add verbose error logging and validate output file
-            if ffmpeg -nostdin -y -i "$src" -c copy -movflags +faststart "$tmp" 2>&1 | tee /tmp/ffmpeg_convert.log >&2; then
+            echo "Converting TS to MP4: $(basename "$src")" >&2
+            
+            # First, validate the input TS file
+            if ! ffprobe -v error "$src" >/dev/null 2>&1; then
+              echo "  WARNING: Input TS file is corrupted or incomplete, uploading as-is" >&2
+              echo "$src"
+              return
+            fi
+            
+            # Convert with faststart for web playback
+            # -fflags +genpts: Generate presentation timestamps for better compatibility
+            # -avoid_negative_ts make_zero: Fix timestamp issues
+            if ffmpeg -nostdin -y -fflags +genpts -i "$src" \
+                -c copy -movflags +faststart -avoid_negative_ts make_zero \
+                "$tmp" 2>&1 | tee /tmp/ffmpeg_convert.log >&2; then
               if [ -s "$tmp" ]; then
                 # Validate MP4 structure with ffprobe
                 if ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$tmp" >/dev/null 2>&1; then
                   mv "$tmp" "$dst"
                   rm -f "$src"
+                  echo "  ✓ Converted to MP4 with faststart" >&2
                   echo "$dst"
                 else
-                  echo "ERROR: MP4 validation failed, file may be corrupted" >&2
+                  echo "  WARNING: MP4 validation failed, uploading TS instead" >&2
                   cat /tmp/ffmpeg_convert.log >&2
                   rm -f "$tmp" "$dst"
                   echo "$src"
                 fi
               else
-                echo "ERROR: Output file is empty" >&2
+                echo "  WARNING: Output file is empty, uploading TS instead" >&2
                 rm -f "$tmp" "$dst"
                 echo "$src"
               fi
             else
-              echo "ERROR: ffmpeg conversion failed" >&2
+              echo "  WARNING: ffmpeg conversion failed, uploading TS instead" >&2
               cat /tmp/ffmpeg_convert.log >&2
               rm -f "$tmp" "$dst"
               echo "$src"
@@ -319,26 +332,40 @@ jobs:
 
           fix_faststart() {
             local src="$1" tmp="${1%.mp4}_fs.mp4"
-            # CRITICAL FIX: Validate input file first before attempting conversion
+            echo "Optimizing MP4 for web playback: $(basename "$src")" >&2
+            
+            # Validate input file first
             if ! ffprobe -v error "$src" >/dev/null 2>&1; then
-              echo "WARNING: Input MP4 is corrupted or incomplete, skipping faststart fix" >&2
+              echo "  WARNING: Input MP4 is corrupted, skipping optimization" >&2
               echo "$src"
               return
             fi
+            
+            # Check if faststart is already applied
+            if ffmpeg -nostdin -i "$src" 2>&1 | grep -q "moov atom not at start"; then
+              echo "  Applying faststart optimization..." >&2
+            else
+              echo "  ✓ Already optimized for web playback" >&2
+              echo "$src"
+              return
+            fi
+            
+            # Apply faststart
             if ffmpeg -nostdin -y -i "$src" -c copy -movflags +faststart "$tmp" 2>&1 | tee /tmp/ffmpeg_faststart.log >&2; then
               if [ -s "$tmp" ]; then
-                # Validate output before replacing original
+                # Validate output
                 if ffprobe -v error "$tmp" >/dev/null 2>&1; then
                   mv "$tmp" "$src"
+                  echo "  ✓ Faststart applied successfully" >&2
                 else
-                  echo "WARNING: Faststart output validation failed, keeping original" >&2
+                  echo "  WARNING: Faststart output validation failed, keeping original" >&2
                   rm -f "$tmp"
                 fi
               else
                 rm -f "$tmp"
               fi
             else
-              echo "WARNING: Faststart conversion failed, keeping original" >&2
+              echo "  WARNING: Faststart conversion failed, keeping original" >&2
               cat /tmp/ffmpeg_faststart.log >&2
               rm -f "$tmp"
             fi
