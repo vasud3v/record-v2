@@ -92,7 +92,7 @@ jobs:
     name: "Record [${{ matrix.job.channel }}]"
     needs: validate
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 300
     strategy:
       matrix:
         job: ${{ fromJson(needs.validate.outputs.matrix_jobs) }}
@@ -582,8 +582,8 @@ jobs:
             done
           }
 
-          # Stop goondvr at 5h 15m, leaving 25 min for cleanup before the 5h 40m hard timeout.
-          MAX_RECORD_SECS=18900
+          # Stop goondvr at 5h, leaving no buffer time (workflow timeout is also 5h)
+          MAX_RECORD_SECS=18000
 
           echo "=========================================="
           echo "Starting recording"
