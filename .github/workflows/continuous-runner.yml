@@ -173,7 +173,7 @@ jobs:
             --arg cookies "$COOKIES" \
             --arg ua "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" \
             '{cookies:$cookies,user_agent:$ua,cf_channel_threshold:5,cf_global_threshold:3,
-              notify_cooldown_hours:4,disk_warning_percent:80,disk_critical_percent:90}' \
+              notify_cooldown_hours:4,disk_warning_percent:98,disk_critical_percent:99}' \
             > ./conf/settings.json
           if ! jq empty ./conf/settings.json 2>/dev/null; then
             echo "ERROR: settings.json invalid JSON"
@@ -544,23 +544,28 @@ jobs:
             local upload_queue=()
             while true; do
               sleep 30
-              # Check disk first - AGGRESSIVE thresholds to prevent disk full
-              local pct
+              # Check disk first - Use absolute free space instead of percentage
+              # GitHub Actions runners start at ~77% usage, so percentage-based checks don't work
+              local free_gb pct
+              free_gb=$(df . --output=avail 2>/dev/null | tail -1 | awk '{printf "%.1f", $1/1024/1024}')
               pct=$(df . --output=pcent 2>/dev/null | tail -1 | tr -dc '0-9' || df -h . | tail -1 | awk '{print $5}' | tr -dc '0-9')
-              if [ -z "$pct" ]; then
+              if [ -z "$free_gb" ]; then
                 echo "WARNING: Cannot determine disk usage" >&2
-                pct=0
+                free_gb=10
               fi
-              if [ "${pct:-0}" -ge 75 ]; then
-                echo "DISK CRITICAL (${pct}%) - stopping goondvr immediately" >&2
+              # Kill if less than 1GB free (critical)
+              if (( $(echo "$free_gb < 1.0" | bc -l) )); then
+                echo "DISK CRITICAL (${free_gb}GB free, ${pct}%) - stopping goondvr immediately" >&2
                 pkill -TERM goondvr 2>/dev/null || true
                 sleep 2
                 pkill -9 goondvr 2>/dev/null || true
                 pkill -9 ffmpeg 2>/dev/null || true
-              elif [ "${pct:-0}" -ge 60 ]; then
-                echo "DISK WARNING (${pct}%) - uploading aggressively" >&2
-              elif [ "${pct:-0}" -ge 50 ]; then
-                echo "DISK NOTICE (${pct}%)" >&2
+              # Warn if less than 2GB free
+              elif (( $(echo "$free_gb < 2.0" | bc -l) )); then
+                echo "DISK WARNING (${free_gb}GB free, ${pct}%) - uploading aggressively" >&2
+              # Notice if less than 3GB free
+              elif (( $(echo "$free_gb < 3.0" | bc -l) )); then
+                echo "DISK NOTICE (${free_gb}GB free, ${pct}%)" >&2
               fi
               
               # Process up to 5 files per cycle (increased from 3 for faster clearing)
