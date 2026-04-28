@@ -1505,6 +1505,8 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 
 			// Check for #EXT-X-ENDLIST tag which indicates stream has ended
 			if strings.Contains(videoResp, "#EXT-X-ENDLIST") || strings.Contains(audioResp, "#EXT-X-ENDLIST") {
+				fmt.Printf("[DEBUG-RECORDING] MUXED EXITING: Found #EXT-X-ENDLIST in playlist (video=%v, audio=%v)\n",
+					strings.Contains(videoResp, "#EXT-X-ENDLIST"), strings.Contains(audioResp, "#EXT-X-ENDLIST"))
 				if server.Config.Debug {
 					fmt.Printf("[DEBUG] muxed playlist contains #EXT-X-ENDLIST, stream has ended\n")
 				}
@@ -1512,13 +1514,22 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 			}
 
 			// Check if playlist has gone stale (no new segments for staleTimeout duration)
-			if time.Since(lastSegmentTime) > staleTimeout {
+			timeSinceLastSegment := time.Since(lastSegmentTime)
+			if timeSinceLastSegment > staleTimeout {
+				fmt.Printf("[DEBUG-RECORDING] MUXED EXITING: Playlist stale - no new segments for %v (timeout=%v)\n", timeSinceLastSegment, staleTimeout)
 				if server.Config.Debug {
 					fmt.Printf("[DEBUG] muxed playlist stale: no new segments for %v, stream likely ended\n", staleTimeout)
 				}
 				return internal.ErrChannelOffline
 			}
+			
+			// Log if we're getting close to stale timeout
+			if timeSinceLastSegment > staleTimeout/2 {
+				fmt.Printf("[DEBUG-RECORDING] MUXED WARNING: No new segments for %v (%.0f%% of stale timeout)\n",
+					timeSinceLastSegment, float64(timeSinceLastSegment)/float64(staleTimeout)*100)
+			}
 
+			fmt.Printf("[DEBUG-RECORDING] MUXED: Loop iteration complete, sleeping 1s before next poll\n")
 			<-time.After(1 * time.Second)
 			continue
 		}
