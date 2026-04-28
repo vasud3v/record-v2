@@ -419,12 +419,12 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 
 	if os.Getenv("GITHUB_ACTIONS") == "true" {
 		// Live streams have no predetermined length, so a percentage progress bar is misleading.
-		// Instead, we use a sparse time-based heartbeat (e.g., every 5 minutes) to show it's active.
+		// Instead, we use a sparse time-based heartbeat to show it's active.
 		minutes := int(ch.Duration) / 60
-		reportInterval := 5 // Report every 5 minutes
+		reportInterval := 1 // Report every 1 minute
 		
-		// Report when we cross a 5-minute boundary (not just at exact multiples)
-		// This ensures we report at 5:xx, 10:xx, 15:xx, etc. even if we don't hit the exact second
+		// Report when we cross a 1-minute boundary (not just at exact multiples)
+		// This ensures we report at 1:xx, 2:xx, 3:xx, etc. even if we don't hit the exact second
 		currentBoundary := (minutes / reportInterval) * reportInterval
 		if minutes >= reportInterval && currentBoundary > ch.lastReportedProgress {
 			ch.Info("—— Recording Active | Duration: %s | Current File: %s", formattedDuration, formattedFilesize)
