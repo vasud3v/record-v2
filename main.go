@@ -184,7 +184,7 @@ func startGitHubActionsMode(c *cli.Context) error {
 	// Refresh cookies using FlareSolverr if in GitHub Actions
 	// This gets fresh cookies valid for the GitHub Actions runner's IP
 	if internal.ShouldRefreshCookies() {
-		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second) // 3 minutes
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second) // 5 minutes - increased for FlareSolverr startup time
 		defer cancel()
 		if err := internal.RefreshCookiesWithFlareSolverr(ctx); err != nil {
 			log.Printf("⚠️  Warning: Failed to refresh cookies with FlareSolverr: %v", err)
