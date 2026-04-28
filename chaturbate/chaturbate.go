@@ -916,10 +916,22 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 		staleTimeout = 60 * time.Minute // 60 minutes for GitHub Actions
 	}
 
+	fmt.Printf("[DEBUG-RECORDING] Starting watchVideoOnlySegments - staleTimeout=%v\n", staleTimeout)
+	segmentCount := 0
+	loopCount := 0
+
 	for {
+		loopCount++
+		if loopCount%60 == 0 { // Log every 60 seconds
+			fmt.Printf("[DEBUG-RECORDING] Loop iteration %d - lastSeq=%d, segments processed=%d, time since last segment=%v\n",
+				loopCount, lastSeq, segmentCount, time.Since(lastSegmentTime))
+		}
+
 		resp, err := client.Get(ctx, p.PlaylistURL)
 		if err != nil {
+			fmt.Printf("[DEBUG-RECORDING] Playlist fetch error (attempt %d/5): %v\n", consecutiveErrors+1, err)
 			if consecutiveErrors++; consecutiveErrors >= 5 {
+				fmt.Printf("[DEBUG-RECORDING] EXITING: Too many consecutive errors (%d)\n", consecutiveErrors)
 				return fmt.Errorf("get playlist: %w", err)
 			}
 			<-time.After(2 * time.Second)
@@ -928,6 +940,7 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 		
 		pl, _, err := safeDecodeFrom(strings.NewReader(normalizeM3U8(decodeMouflon(resp, p.MouflonPDKey))))
 		if err != nil {
+			fmt.Printf("[DEBUG-RECORDING] Playlist decode error (attempt %d/5): %v\n", consecutiveErrors+1, err)
 			if server.Config.Debug {
 				fmt.Printf("[DEBUG] variant playlist parse failed: %v\n", err)
 				fmt.Printf("[DEBUG]   Playlist URL: %s\n", p.PlaylistURL)
@@ -938,6 +951,7 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 				fmt.Printf("[DEBUG]   Response (first 2000 chars):\n%s\n", resp[:end])
 			}
 			if consecutiveErrors++; consecutiveErrors >= 5 {
+				fmt.Printf("[DEBUG-RECORDING] EXITING: Too many decode errors (%d)\n", consecutiveErrors)
 				return fmt.Errorf("decode from: %w", err)
 			}
 			<-time.After(2 * time.Second)
@@ -945,6 +959,7 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 		}
 		playlist, ok := pl.(*m3u8.MediaPlaylist)
 		if !ok {
+			fmt.Printf("[DEBUG-RECORDING] EXITING: Failed to cast to media playlist\n")
 			return fmt.Errorf("cast to media playlist")
 		}
 		consecutiveErrors = 0
@@ -960,6 +975,7 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 				playlist.SeqNo, count, lastSeq, p.PlaylistURL)
 		}
 
+		newSegmentsFound := 0
 		for _, v := range playlist.Segments {
 			if v == nil {
 				continue
@@ -1031,15 +1047,24 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 				resp = shiftSegmentAllTracks(resp, trackBaseTimes)
 			}
 			if err := handler(resp, v.Duration); err != nil {
+				fmt.Printf("[DEBUG-RECORDING] EXITING: Handler error: %v\n", err)
 				return fmt.Errorf("handler: %w", err)
 			}
 			
 			// Update last segment time when we successfully process a new segment
 			lastSegmentTime = time.Now()
+			segmentCount++
+			newSegmentsFound++
+		}
+
+		if newSegmentsFound > 0 {
+			fmt.Printf("[DEBUG-RECORDING] Processed %d new segments (total: %d, lastSeq: %d)\n", 
+				newSegmentsFound, segmentCount, lastSeq)
 		}
 
 		// Check for #EXT-X-ENDLIST tag which indicates stream has ended
 		if strings.Contains(resp, "#EXT-X-ENDLIST") {
+			fmt.Printf("[DEBUG-RECORDING] EXITING: Found #EXT-X-ENDLIST tag in playlist\n")
 			if server.Config.Debug {
 				fmt.Printf("[DEBUG] playlist contains #EXT-X-ENDLIST, stream has ended\n")
 			}
@@ -1048,7 +1073,10 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 		}
 
 		// Check if playlist has gone stale (no new segments for staleTimeout duration)
-		if time.Since(lastSegmentTime) > staleTimeout {
+		timeSinceLastSegment := time.Since(lastSegmentTime)
+		if timeSinceLastSegment > staleTimeout {
+			fmt.Printf("[DEBUG-RECORDING] EXITING: Stale timeout reached - no segments for %v (threshold: %v)\n",
+				timeSinceLastSegment, staleTimeout)
 			fmt.Printf("[INFO] Stream ended (no new segments for %v, last segment at %v)\n", 
 				staleTimeout, lastSegmentTime.Format("15:04:05"))
 			if server.Config.Debug {

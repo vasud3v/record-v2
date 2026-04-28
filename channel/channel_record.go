@@ -195,6 +195,8 @@ func (ch *Channel) Update() {
 // RecordStream records the stream of the channel using the provided site and HTTP client.
 // It retrieves the stream information and starts watching the segments.
 func (ch *Channel) RecordStream(ctx context.Context, runID uint64, s site.Site, req *internal.Req) error {
+	fmt.Printf("[DEBUG-RECORDING] RecordStream started for channel: %s\n", ch.Config.Username)
+	
 	// Pre-flight disk space check
 	diskPercent := server.Manager.CheckDiskSpace()
 	if diskPercent > 0 {
@@ -203,6 +205,7 @@ func (ch *Channel) RecordStream(ctx context.Context, runID uint64, s site.Site, 
 			critThresh = 95
 		}
 		if diskPercent >= critThresh {
+			fmt.Printf("[DEBUG-RECORDING] EXITING: Disk space critical (%.0f%% used)\n", diskPercent)
 			return fmt.Errorf("disk space critical (%.0f%% used): %w", diskPercent, internal.ErrDiskSpaceCritical)
 		}
 	}
@@ -306,17 +309,24 @@ func (ch *Channel) RecordStream(ctx context.Context, runID uint64, s site.Site, 
 	}
 	ch.Info("stream type: %s, resolution %dp (target: %dp), framerate %dfps (target: %dfps)", streamType, playlist.Resolution, ch.Config.Resolution, playlist.Framerate, ch.Config.Framerate)
 
+	fmt.Printf("[DEBUG-RECORDING] Starting WatchSegments for channel: %s\n", ch.Config.Username)
+	fmt.Printf("[DEBUG-RECORDING] MaxDuration: %d, MaxFilesize: %d\n", ch.Config.MaxDuration, ch.Config.MaxFilesize)
+	
 	// WatchSegments will block here while recording, and return when stream ends
 	err = playlist.WatchSegments(ctx, func(b []byte, duration float64) error {
 		return ch.handleSegmentForMonitor(runID, b, duration)
 	})
 
+	fmt.Printf("[DEBUG-RECORDING] WatchSegments returned for channel: %s, error: %v\n", ch.Config.Username, err)
+
 	// If we successfully started recording and it ended, return a special error
 	// to signal that we should check again immediately (10s retry)
 	if err == nil || errors.Is(err, internal.ErrChannelOffline) {
+		fmt.Printf("[DEBUG-RECORDING] Stream ended normally, returning ErrStreamEnded\n")
 		return internal.ErrStreamEnded
 	}
 
+	fmt.Printf("[DEBUG-RECORDING] Returning error: %v\n", err)
 	return err
 }
 
@@ -331,11 +341,18 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 	isCurrentRun := ch.monitorRunID == runID
 	ch.monitorMu.Unlock()
 
-	if isPaused || !isCurrentRun {
+	if isPaused {
+		fmt.Printf("[DEBUG-RECORDING] SEGMENT REJECTED: Channel is paused\n")
+		return retry.Unrecoverable(internal.ErrPaused)
+	}
+	
+	if !isCurrentRun {
+		fmt.Printf("[DEBUG-RECORDING] SEGMENT REJECTED: Not current run (runID: %d, current: %d)\n", runID, ch.monitorRunID)
 		return retry.Unrecoverable(internal.ErrPaused)
 	}
 
 	if ch.File == nil {
+		fmt.Printf("[DEBUG-RECORDING] SEGMENT ERROR: No active file\n")
 		return fmt.Errorf("write file: no active file")
 	}
 
@@ -377,6 +394,11 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 	formattedDuration := internal.FormatDuration(ch.Duration)
 	formattedFilesize := internal.FormatFilesize(ch.Filesize)
 	shouldSwitch := ch.shouldSwitchFileLocked()
+
+	if shouldSwitch {
+		fmt.Printf("[DEBUG-RECORDING] FILE SWITCH: Duration=%.2f, MaxDuration=%d, Filesize=%d, MaxFilesize=%d\n",
+			ch.Duration, ch.Config.MaxDuration, ch.Filesize, ch.Config.MaxFilesize)
+	}
 
 	var newFilename string
 	if shouldSwitch {
