@@ -375,12 +375,17 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 
 	n, err := ch.File.Write(b)
 	if err != nil {
+		fmt.Printf("[DEBUG-RECORDING] SEGMENT WRITE ERROR: %v\n", err)
 		return fmt.Errorf("write file: %w", err)
 	}
 
+	oldDuration := ch.Duration
 	ch.Filesize += int64(n)
 	ch.Duration += duration
 	ch.segmentCount++
+	
+	fmt.Printf("[DEBUG-RECORDING] SEGMENT WRITTEN: bytes=%d, duration=%.3fs, totalDuration=%.2fs->%.2fs, totalSize=%d, segmentCount=%d\n",
+		n, duration, oldDuration, ch.Duration, ch.Filesize, ch.segmentCount)
 	
 	// CRITICAL FIX: Sync every 3 segments (~3 seconds) to minimize data loss on crashes
 	// This ensures data is written to disk more frequently, reducing corruption risk

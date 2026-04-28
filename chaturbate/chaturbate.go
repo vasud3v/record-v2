@@ -1156,10 +1156,9 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 	lastSegmentTime := time.Now()
 	// Use longer timeout in GitHub Actions to account for network variability
 	// CRITICAL: Set to 60 minutes to prevent premature stops during slow streams
-	// TEMPORARY: Reduced to 10 minutes for debugging
-	staleTimeout := 10 * time.Minute
+	staleTimeout := 60 * time.Minute
 	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		staleTimeout = 10 * time.Minute // 10 minutes for debugging
+		staleTimeout = 60 * time.Minute
 	}
 
 	fmt.Printf("[DEBUG-RECORDING] Starting watchMuxedSegments - staleTimeout=%v\n", staleTimeout)
@@ -1413,9 +1412,11 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 			if len(newAudioSegs) > maxLen {
 				maxLen = len(newAudioSegs)
 			}
+			fmt.Printf("[DEBUG-RECORDING] MUXED: Processing %d segment pairs (video=%d, audio=%d)\n", maxLen, len(newVideoSegs), len(newAudioSegs))
 			for i := 0; i < maxLen; i++ {
 				var chunk []byte
 				var chunkDuration float64
+				fmt.Printf("[DEBUG-RECORDING] MUXED: Processing pair %d/%d\n", i+1, maxLen)
 
 				if i < len(newVideoSegs) {
 					vseg := newVideoSegs[i]
@@ -1428,15 +1429,20 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 						retry.DelayType(retry.FixedDelay),
 					)
 					if err == nil {
+						fmt.Printf("[DEBUG-RECORDING] MUXED: Video segment downloaded, size=%d bytes, duration=%.3fs\n", len(segBytes), vseg.duration)
 						if !videoBaseSet {
 							if t, ok := extractMoofFirstTfdt(segBytes); ok {
 								videoTimeBase = t
 								videoBaseSet = true
+								fmt.Printf("[DEBUG-RECORDING] MUXED: Video timebase set to %d\n", videoTimeBase)
 							}
 						}
 						segBytes = shiftSegmentTfdt(segBytes, 1, videoTimeBase)
 						chunk = append(chunk, segBytes...)
 						chunkDuration = vseg.duration
+						fmt.Printf("[DEBUG-RECORDING] MUXED: Video added to chunk, chunkDuration=%.3fs\n", chunkDuration)
+					} else {
+						fmt.Printf("[DEBUG-RECORDING] MUXED: Video segment download FAILED: %v\n", err)
 					}
 				}
 				if i < len(newAudioSegs) {
@@ -1450,15 +1456,14 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 						retry.DelayType(retry.FixedDelay),
 					)
 					if err != nil {
-						fmt.Printf("[WARN] audio seg download failed: %v\n", err)
+						fmt.Printf("[DEBUG-RECORDING] MUXED: Audio segment download FAILED: %v\n", err)
 					} else {
+						fmt.Printf("[DEBUG-RECORDING] MUXED: Audio segment downloaded, size=%d bytes, duration=%.3fs\n", len(segBytes), aseg.duration)
 						if !audioBaseSet {
 							if t, ok := extractMoofFirstTfdt(segBytes); ok {
 								audioTimeBase = t
 								audioBaseSet = true
-								if server.Config.Debug {
-									fmt.Printf("[DEBUG] muxed: audio base=%d\n", audioTimeBase)
-								}
+								fmt.Printf("[DEBUG-RECORDING] MUXED: Audio timebase set to %d\n", audioTimeBase)
 							}
 						}
 						if server.Config.Debug {
@@ -1473,14 +1478,28 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 						segBytes = rewriteAudioMoofTrackID(segBytes)
 						segBytes = shiftSegmentTfdt(segBytes, 2, audioTimeBase)
 						chunk = append(chunk, segBytes...)
+						// Set chunkDuration from audio if video didn't set it (or use max of both)
+						oldDuration := chunkDuration
+						if chunkDuration == 0 || aseg.duration > chunkDuration {
+							chunkDuration = aseg.duration
+						}
+						fmt.Printf("[DEBUG-RECORDING] MUXED: Audio added to chunk, chunkDuration changed from %.3fs to %.3fs\n", oldDuration, chunkDuration)
 					}
 				}
 				if len(chunk) > 0 {
+					if chunkDuration == 0 {
+						fmt.Printf("[DEBUG-RECORDING] MUXED: WARNING - chunk has data but duration is 0! This should not happen.\n")
+					}
+					fmt.Printf("[DEBUG-RECORDING] MUXED: Calling handler with chunk size=%d bytes, duration=%.3fs\n", len(chunk), chunkDuration)
 					if err := handler(chunk, chunkDuration); err != nil {
+						fmt.Printf("[DEBUG-RECORDING] MUXED: Handler returned ERROR: %v\n", err)
 						return fmt.Errorf("handler muxed segment group: %w", err)
 					}
+					fmt.Printf("[DEBUG-RECORDING] MUXED: Handler succeeded - segment written\n")
 					// Update last segment time when we successfully write a chunk
 					lastSegmentTime = time.Now()
+				} else {
+					fmt.Printf("[DEBUG-RECORDING] MUXED: Skipping handler call - chunk is empty\n")
 				}
 			}
 
