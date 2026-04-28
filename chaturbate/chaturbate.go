@@ -1596,8 +1596,10 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 
 		for _, seg := range pending {
 			if err := handler(seg.data, seg.duration); err != nil {
+				fmt.Printf("[DEBUG-RECORDING] MUXED HANDLER ERROR (stripchat): %v\n", err)
 				return fmt.Errorf("handler muxed segment: %w", err)
 			}
+			fmt.Printf("[DEBUG-RECORDING] MUXED: Successfully wrote segment (duration: %.3f)\n", seg.duration)
 		}
 
 		// Update last segment time if we processed any new segments
