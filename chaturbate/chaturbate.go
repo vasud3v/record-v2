@@ -1037,6 +1037,14 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 			lastSegmentTime = time.Now()
 		}
 
+		// Check for #EXT-X-ENDLIST tag which indicates stream has ended
+		if strings.Contains(resp, "#EXT-X-ENDLIST") {
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] playlist contains #EXT-X-ENDLIST, stream has ended\n")
+			}
+			return internal.ErrChannelOffline
+		}
+
 		// Check if playlist has gone stale (no new segments for staleTimeout duration)
 		if time.Since(lastSegmentTime) > staleTimeout {
 			if server.Config.Debug {
@@ -1081,9 +1089,10 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 	// Track when we last received a new segment to detect stale streams
 	lastSegmentTime := time.Now()
 	// Use longer timeout in GitHub Actions to account for network variability
-	staleTimeout := 30 * time.Minute
+	// CRITICAL: Set to 60 minutes to prevent premature stops during slow streams
+	staleTimeout := 60 * time.Minute
 	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		staleTimeout = 30 * time.Minute // 3 minutes for GitHub Actions
+		staleTimeout = 60 * time.Minute // 60 minutes for GitHub Actions
 	}
 
 	for {
@@ -1334,6 +1343,14 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 				}
 			}
 
+			// Check for #EXT-X-ENDLIST tag which indicates stream has ended
+			if strings.Contains(videoResp, "#EXT-X-ENDLIST") || strings.Contains(audioResp, "#EXT-X-ENDLIST") {
+				if server.Config.Debug {
+					fmt.Printf("[DEBUG] muxed playlist contains #EXT-X-ENDLIST, stream has ended\n")
+				}
+				return internal.ErrChannelOffline
+			}
+
 			// Check if playlist has gone stale (no new segments for staleTimeout duration)
 			if time.Since(lastSegmentTime) > staleTimeout {
 				if server.Config.Debug {
@@ -1445,6 +1462,14 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 		// Update last segment time if we processed any new segments
 		if len(newVideoSegs) > 0 || len(newAudioSegs) > 0 {
 			lastSegmentTime = time.Now()
+		}
+
+		// Check for #EXT-X-ENDLIST tag which indicates stream has ended
+		if strings.Contains(videoResp, "#EXT-X-ENDLIST") || strings.Contains(audioResp, "#EXT-X-ENDLIST") {
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] muxed playlist contains #EXT-X-ENDLIST, stream has ended\n")
+			}
+			return internal.ErrChannelOffline
 		}
 
 		// Check if playlist has gone stale (no new segments for staleTimeout duration)
