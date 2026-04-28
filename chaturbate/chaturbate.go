@@ -1043,11 +1043,14 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 			if server.Config.Debug {
 				fmt.Printf("[DEBUG] playlist contains #EXT-X-ENDLIST, stream has ended\n")
 			}
+			fmt.Printf("[INFO] Stream ended (detected #EXT-X-ENDLIST tag)\n")
 			return internal.ErrChannelOffline
 		}
 
 		// Check if playlist has gone stale (no new segments for staleTimeout duration)
 		if time.Since(lastSegmentTime) > staleTimeout {
+			fmt.Printf("[INFO] Stream ended (no new segments for %v, last segment at %v)\n", 
+				staleTimeout, lastSegmentTime.Format("15:04:05"))
 			if server.Config.Debug {
 				fmt.Printf("[DEBUG] playlist stale: no new segments for %v, stream likely ended\n", staleTimeout)
 			}
@@ -1470,11 +1473,14 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 			if server.Config.Debug {
 				fmt.Printf("[DEBUG] muxed playlist contains #EXT-X-ENDLIST, stream has ended\n")
 			}
+			fmt.Printf("[INFO] Muxed stream ended (detected #EXT-X-ENDLIST tag)\n")
 			return internal.ErrChannelOffline
 		}
 
 		// Check if playlist has gone stale (no new segments for staleTimeout duration)
 		if time.Since(lastSegmentTime) > staleTimeout {
+			fmt.Printf("[INFO] Muxed stream ended (no new segments for %v, last segment at %v)\n", 
+				staleTimeout, lastSegmentTime.Format("15:04:05"))
 			if server.Config.Debug {
 				fmt.Printf("[DEBUG] muxed playlist stale: no new segments for %v, stream likely ended\n", staleTimeout)
 			}
