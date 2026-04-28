@@ -925,10 +925,6 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 			continue
 		}
 		
-		// Update last segment time on successful playlist fetch
-		// This prevents false "stale stream" detection during slow periods
-		lastSegmentTime = time.Now()
-		
 		pl, _, err := safeDecodeFrom(strings.NewReader(normalizeM3U8(decodeMouflon(resp, p.MouflonPDKey))))
 		if err != nil {
 			if server.Config.Debug {
@@ -1100,10 +1096,6 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 			<-time.After(2 * time.Second)
 			continue
 		}
-		
-		// Update last segment time on successful playlist fetch
-		// This prevents false "stale stream" detection during slow periods
-		lastSegmentTime = time.Now()
 		
 		vpl, _, err := safeDecodeFrom(strings.NewReader(normalizeM3U8(decodeMouflon(videoResp, p.MouflonPDKey))))
 		if err != nil {
