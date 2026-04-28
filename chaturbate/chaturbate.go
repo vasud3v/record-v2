@@ -1156,9 +1156,10 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 	lastSegmentTime := time.Now()
 	// Use longer timeout in GitHub Actions to account for network variability
 	// CRITICAL: Set to 60 minutes to prevent premature stops during slow streams
-	staleTimeout := 60 * time.Minute
+	// TEMPORARY: Reduced to 10 minutes for debugging
+	staleTimeout := 10 * time.Minute
 	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		staleTimeout = 60 * time.Minute // 60 minutes for GitHub Actions
+		staleTimeout = 10 * time.Minute // 10 minutes for debugging
 	}
 
 	for {
