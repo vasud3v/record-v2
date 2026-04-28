@@ -367,22 +367,32 @@ func (h *Req) GetBytes(ctx context.Context, url string) ([]byte, error) {
 		return nil, ErrAgeVerification
 	}
 
-	// For 403 responses, log the body to understand what's happening
-	// Don't immediately assume it's a private stream
+	// For 403 responses, check if it's a known benign response
 	if resp.StatusCode == http.StatusForbidden {
 		bodyPreview := string(b)
 		if len(bodyPreview) > 500 {
 			bodyPreview = bodyPreview[:500] + "..."
 		}
-		fmt.Printf("[WARN] HTTP 403 for %s - Response body: %s\n", req.URL, bodyPreview)
+		
+		// "session_duplicated" is a benign Chaturbate API response, not an error
+		if strings.Contains(string(b), "session_duplicated") {
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] HTTP 403 (session_duplicated) - This is normal, continuing...\n")
+			}
+			// Return the body for parsing - it's not actually an error
+			return b, err
+		}
+		
+		// Log other 403 responses for debugging
+		if server.Config.Debug {
+			fmt.Printf("[DEBUG] HTTP 403 for %s - Response body: %s\n", req.URL, bodyPreview)
+		}
 		
 		// Only return ErrPrivateStream if we're sure it's actually private
-		// Otherwise, return the body so the caller can parse it
 		if strings.Contains(string(b), "private") || strings.Contains(string(b), "Private") {
 			return nil, fmt.Errorf("forbidden: %w", ErrPrivateStream)
 		}
 		// If it's not about private show, return the body for parsing
-		// The API might still have useful JSON data
 	}
 
 	return b, err
@@ -424,13 +434,26 @@ func (h *Req) DoRequest(req *http.Request) (string, error) {
 		return "", ErrAgeVerification
 	}
 
-	// For 403 responses, log the body to understand what's happening
+	// For 403 responses, check if it's a known benign response
 	if resp.StatusCode == http.StatusForbidden {
 		bodyPreview := string(b)
 		if len(bodyPreview) > 500 {
 			bodyPreview = bodyPreview[:500] + "..."
 		}
-		fmt.Printf("[WARN] HTTP 403 in DoRequest - Response body: %s\n", bodyPreview)
+		
+		// "session_duplicated" is a benign Chaturbate API response, not an error
+		if strings.Contains(string(b), "session_duplicated") {
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] HTTP 403 (session_duplicated) - This is normal, continuing...\n")
+			}
+			// Return the body for parsing - it's not actually an error
+			return string(b), nil
+		}
+		
+		// Log other 403 responses for debugging
+		if server.Config.Debug {
+			fmt.Printf("[DEBUG] HTTP 403 in DoRequest - Response body: %s\n", bodyPreview)
+		}
 		
 		// Only return ErrPrivateStream if we're sure
 		if strings.Contains(string(b), "private") || strings.Contains(string(b), "Private") {
@@ -623,13 +646,27 @@ func (h *Req) GetBytesWithCycleTLS(ctx context.Context, url string) ([]byte, err
 		return nil, ErrAgeVerification
 	}
 	
-	// For 403 responses with CycleTLS, log the body
+	// For 403 responses with CycleTLS, check if it's a known benign response
 	if response.Status == http.StatusForbidden {
 		bodyPreview := response.Body
 		if len(bodyPreview) > 500 {
 			bodyPreview = bodyPreview[:500] + "..."
 		}
-		fmt.Printf("[WARN] HTTP 403 in CycleTLS - Response body: %s\n", bodyPreview)
+		
+		// "session_duplicated" is a benign Chaturbate API response, not an error
+		// It just means the session is already active - this is normal and expected
+		if strings.Contains(response.Body, "session_duplicated") {
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] HTTP 403 (session_duplicated) - This is normal, continuing...\n")
+			}
+			// Return the body for parsing - it's not actually an error
+			return body, nil
+		}
+		
+		// Log other 403 responses for debugging
+		if server.Config.Debug {
+			fmt.Printf("[DEBUG] HTTP 403 in CycleTLS - Response body: %s\n", bodyPreview)
+		}
 		
 		// Only return ErrPrivateStream if we're sure
 		if strings.Contains(response.Body, "private") || strings.Contains(response.Body, "Private") {

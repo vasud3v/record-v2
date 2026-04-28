@@ -61,10 +61,16 @@ func NewFlareSolverrClient() *FlareSolverrClient {
 		baseURL = "http://localhost:8191/v1"
 	}
 	
+	// In GitHub Actions, FlareSolverr service container needs more time to start
+	timeout := 240 * time.Second // Default: 4 minutes
+	if os.Getenv("GITHUB_ACTIONS") == "true" {
+		timeout = 360 * time.Second // GitHub Actions: 6 minutes (service startup + challenge solving)
+	}
+	
 	return &FlareSolverrClient{
 		baseURL: baseURL,
 		client: &http.Client{
-			Timeout: 240 * time.Second, // 4 minutes for FlareSolverr to solve challenge (increased from 3 min)
+			Timeout: timeout,
 		},
 	}
 }
