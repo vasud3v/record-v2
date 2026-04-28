@@ -537,127 +537,6 @@ jobs:
             fi
           }
 
-          # Background uploader: runs every 90s to check for completed recordings.
-          # CRITICAL FIX: Increased from 30s to 90s to prevent premature uploads of active recordings.
-          # Uploads files that are (a) not held open by lsof/fuser and (b) size-stable for 60s.
-          # The 60-second stability check (30s + 30s verification) ensures recordings are truly complete.
-          # Also monitors disk usage: warns at 60%, kills goondvr at 75% (more aggressive).
-          bg_uploader() {
-            local upload_queue=()
-            while true; do
-              sleep 90
-              
-              # CRITICAL: Check if goondvr is still running
-              # If it is, be VERY conservative about uploading files
-              local goondvr_running=0
-              if pgrep -x goondvr >/dev/null 2>&1; then
-                goondvr_running=1
-                echo "goondvr is running - using conservative upload strategy" >&2
-              fi
-              # Check disk first - Use absolute free space instead of percentage
-              # GitHub Actions runners start at ~77% usage, so percentage-based checks don't work
-              local free_gb pct
-              free_gb=$(df . --output=avail 2>/dev/null | tail -1 | awk '{printf "%.1f", $1/1024/1024}')
-              pct=$(df . --output=pcent 2>/dev/null | tail -1 | tr -dc '0-9' || df -h . | tail -1 | awk '{print $5}' | tr -dc '0-9')
-              if [ -z "$free_gb" ]; then
-                echo "WARNING: Cannot determine disk usage" >&2
-                free_gb=10
-              fi
-              # Kill if less than 1GB free (critical)
-              if (( $(echo "$free_gb < 1.0" | bc -l) )); then
-                echo "DISK CRITICAL (${free_gb}GB free, ${pct}%) - stopping goondvr immediately" >&2
-                pkill -TERM goondvr 2>/dev/null || true
-                sleep 2
-                pkill -9 goondvr 2>/dev/null || true
-                pkill -9 ffmpeg 2>/dev/null || true
-              # Warn if less than 2GB free
-              elif (( $(echo "$free_gb < 2.0" | bc -l) )); then
-                echo "DISK WARNING (${free_gb}GB free, ${pct}%) - uploading aggressively" >&2
-              # Notice if less than 3GB free
-              elif (( $(echo "$free_gb < 3.0" | bc -l) )); then
-                echo "DISK NOTICE (${free_gb}GB free, ${pct}%)" >&2
-              fi
-              
-              # Process up to 3 files per cycle (reduced from 5 to be more conservative)
-              local processed=0
-              while IFS= read -r f && [ $processed -lt 3 ]; do
-                [ -f "$f" ] || continue
-                
-                # CRITICAL FIX: Check file size first - skip files that are too small
-                local fsize
-                fsize=$(stat -c%s "$f" 2>/dev/null || echo 0)
-                if [ "$fsize" -lt 1048576 ]; then
-                  echo "Skipping small file (likely incomplete): $(basename "$f") ($fsize bytes)" >&2
-                  continue
-                fi
-                
-                # CRITICAL: If goondvr is running, skip files with _0 or no sequence number
-                # These are likely the ACTIVE recording file
-                if [ "$goondvr_running" -eq 1 ]; then
-                  local fname
-                  fname=$(basename "$f")
-                  # Check if filename ends with _0.ext or has no _N before extension
-                  # Pattern: username_YYYY-MM-DD_HH-MM-SS.ext (no sequence) or username_..._0.ext
-                  if [[ "$fname" =~ _[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}\.(ts|mp4|mkv)$ ]] || \
-                     [[ "$fname" =~ _0\.(ts|mp4|mkv)$ ]]; then
-                    echo "Skipping active recording file (goondvr running, no/zero sequence): $fname" >&2
-                    continue
-                  fi
-                fi
-                
-                # CRITICAL FIX: Check if file is currently being written to
-                # Use both lsof and fuser for maximum reliability
-                if lsof "$f" 2>/dev/null | grep -q . || fuser "$f" 2>/dev/null | grep -q .; then
-                  echo "File is open, skipping: $(basename "$f")" >&2
-                  continue
-                fi
-                
-                # CRITICAL FIX: Extended stability check - wait 60 seconds total
-                # First check: wait 30s and verify size hasn't changed
-                local s1 s2
-                s1=$(stat -c%s "$f" 2>/dev/null || echo 0)
-                sleep 30
-                [ -f "$f" ] || continue
-                s2=$(stat -c%s "$f" 2>/dev/null || echo 0)
-                if [ "$s1" != "$s2" ]; then
-                  echo "File still growing (30s check): $(basename "$f") ($s1 -> $s2 bytes)" >&2
-                  continue
-                fi
-                
-                # Second check: wait another 30s and verify again
-                sleep 30
-                [ -f "$f" ] || continue
-                local s3
-                s3=$(stat -c%s "$f" 2>/dev/null || echo 0)
-                if [ "$s2" != "$s3" ]; then
-                  echo "File still growing (60s check): $(basename "$f") ($s2 -> $s3 bytes)" >&2
-                  continue
-                fi
-                
-                # Final check: verify file is not open after stability wait
-                if lsof "$f" 2>/dev/null | grep -q . || fuser "$f" 2>/dev/null | grep -q .; then
-                  echo "File opened during stability check, skipping: $(basename "$f")" >&2
-                  continue
-                fi
-                
-                # CRITICAL FIX: Validate MP4 files before upload
-                if [[ "$f" == *.mp4 ]]; then
-                  if ! ffprobe -v error "$f" >/dev/null 2>&1; then
-                    echo "Skipping corrupted MP4: $(basename "$f")" >&2
-                    rm -f "$f"
-                    continue
-                  fi
-                fi
-                
-                upload_file "$f" "background" &
-                processed=$((processed + 1))
-              done < <(find ./videos -type f \( -name '*.ts' -o -name '*.mp4' -o -name '*.mkv' \) 2>/dev/null | head -20)
-              
-              # Wait for background uploads to complete
-              wait
-            done
-          }
-
           # Stop goondvr at 5h, leaving no buffer time (workflow timeout is also 5h)
           MAX_RECORD_SECS=18000
 
@@ -666,10 +545,8 @@ jobs:
           echo "  Channel : ${{ matrix.job.channel }} (job ${{ matrix.job.id }})"
           echo "  Session : $SESSION_ID"
           echo "  Max time: $((MAX_RECORD_SECS/3600))h $((MAX_RECORD_SECS%3600/60))m"
+          echo "  NOTE: Background uploader disabled - uploads happen after recording completes"
           echo "=========================================="
-
-          bg_uploader &
-          BG_PID=$!
 
           GOONDVR_EXIT=0
           # Interval: Check if channel is online every N minutes when offline
@@ -686,12 +563,6 @@ jobs:
 
           echo "goondvr stopped (exit $GOONDVR_EXIT)"
           
-          # Give bg_uploader time to finish current upload
-          echo "Waiting for background uploader to finish..."
-          sleep 5
-          kill "$BG_PID" 2>/dev/null || true
-          wait "$BG_PID" 2>/dev/null || true
-
           echo "Running final upload sweep..."
           FINAL_OK=0; FINAL_FAIL=0
           while IFS= read -r f; do
