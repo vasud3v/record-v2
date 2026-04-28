@@ -919,14 +919,19 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 	fmt.Printf("[DEBUG-RECORDING] Starting watchVideoOnlySegments - staleTimeout=%v\n", staleTimeout)
 	segmentCount := 0
 	loopCount := 0
+	lastPlaylistPoll := time.Now()
 
 	for {
 		loopCount++
-		if loopCount%60 == 0 { // Log every 60 seconds
-			fmt.Printf("[DEBUG-RECORDING] Loop iteration %d - lastSeq=%d, segments processed=%d, time since last segment=%v\n",
-				loopCount, lastSeq, segmentCount, time.Since(lastSegmentTime))
+		now := time.Now()
+		
+		// Log every 30 seconds instead of 60 to catch issues faster
+		if loopCount%30 == 0 || now.Sub(lastPlaylistPoll) > 30*time.Second {
+			fmt.Printf("[DEBUG-RECORDING] Loop %d - lastSeq=%d, segments=%d, time since last segment=%v, time since last poll=%v\n",
+				loopCount, lastSeq, segmentCount, time.Since(lastSegmentTime), now.Sub(lastPlaylistPoll))
 		}
 
+		lastPlaylistPoll = now
 		resp, err := client.Get(ctx, p.PlaylistURL)
 		if err != nil {
 			fmt.Printf("[DEBUG-RECORDING] Playlist fetch error (attempt %d/5): %v\n", consecutiveErrors+1, err)
@@ -973,6 +978,27 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 			}
 			fmt.Printf("[DEBUG] playlist poll: mediaSeq=%d segments=%d lastSeq=%d url=%s\n",
 				playlist.SeqNo, count, lastSeq, p.PlaylistURL)
+		}
+
+		// Always log playlist info for debugging
+		var segmentCount int
+		var availableSeqs []int
+		for _, v := range playlist.Segments {
+			if v != nil {
+				segmentCount++
+				seq := internal.SegmentSeq(v.URI)
+				if seq == -1 && v.SeqId > 0 {
+					seq = int(v.SeqId)
+				}
+				if seq != -1 {
+					availableSeqs = append(availableSeqs, seq)
+				}
+			}
+		}
+		
+		if loopCount%10 == 0 { // Log every 10 iterations (10 seconds)
+			fmt.Printf("[DEBUG-RECORDING] Playlist: mediaSeq=%d, segments=%d, lastProcessed=%d, available=%v\n",
+				playlist.SeqNo, segmentCount, lastSeq, availableSeqs)
 		}
 
 		newSegmentsFound := 0
@@ -1060,6 +1086,8 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 		if newSegmentsFound > 0 {
 			fmt.Printf("[DEBUG-RECORDING] Processed %d new segments (total: %d, lastSeq: %d)\n", 
 				newSegmentsFound, segmentCount, lastSeq)
+		} else if loopCount%30 == 0 {
+			fmt.Printf("[DEBUG-RECORDING] No new segments found in last 30 iterations (30 seconds)\n")
 		}
 
 		// Check for #EXT-X-ENDLIST tag which indicates stream has ended
@@ -1083,6 +1111,12 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 				fmt.Printf("[DEBUG] playlist stale: no new segments for %v, stream likely ended\n", staleTimeout)
 			}
 			return internal.ErrChannelOffline
+		}
+
+		// Log stale warning every 5 minutes
+		if timeSinceLastSegment > 5*time.Minute && int(timeSinceLastSegment.Minutes())%5 == 0 && loopCount%60 == 0 {
+			fmt.Printf("[DEBUG-RECORDING] WARNING: No new segments for %v (will timeout at %v)\n",
+				timeSinceLastSegment, staleTimeout)
 		}
 
 		<-time.After(1 * time.Second)
