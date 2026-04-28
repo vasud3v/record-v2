@@ -537,13 +537,23 @@ jobs:
             fi
           }
 
-          # Background uploader: runs every 30 s (reduced from 60s for faster uploads).
-          # Uploads files that are (a) not held open by lsof and (b) size-stable for 10 s (reduced from 15s).
+          # Background uploader: runs every 90s to check for completed recordings.
+          # CRITICAL FIX: Increased from 30s to 90s to prevent premature uploads of active recordings.
+          # Uploads files that are (a) not held open by lsof/fuser and (b) size-stable for 60s.
+          # The 60-second stability check (30s + 30s verification) ensures recordings are truly complete.
           # Also monitors disk usage: warns at 60%, kills goondvr at 75% (more aggressive).
           bg_uploader() {
             local upload_queue=()
             while true; do
-              sleep 30
+              sleep 90
+              
+              # CRITICAL: Check if goondvr is still running
+              # If it is, be VERY conservative about uploading files
+              local goondvr_running=0
+              if pgrep -x goondvr >/dev/null 2>&1; then
+                goondvr_running=1
+                echo "goondvr is running - using conservative upload strategy" >&2
+              fi
               # Check disk first - Use absolute free space instead of percentage
               # GitHub Actions runners start at ~77% usage, so percentage-based checks don't work
               local free_gb pct
@@ -568,9 +578,9 @@ jobs:
                 echo "DISK NOTICE (${free_gb}GB free, ${pct}%)" >&2
               fi
               
-              # Process up to 5 files per cycle (increased from 3 for faster clearing)
+              # Process up to 3 files per cycle (reduced from 5 to be more conservative)
               local processed=0
-              while IFS= read -r f && [ $processed -lt 5 ]; do
+              while IFS= read -r f && [ $processed -lt 3 ]; do
                 [ -f "$f" ] || continue
                 
                 # CRITICAL FIX: Check file size first - skip files that are too small
@@ -581,18 +591,52 @@ jobs:
                   continue
                 fi
                 
-                # Double-check with fuser as backup to lsof
+                # CRITICAL: If goondvr is running, skip files with _0 or no sequence number
+                # These are likely the ACTIVE recording file
+                if [ "$goondvr_running" -eq 1 ]; then
+                  local fname
+                  fname=$(basename "$f")
+                  # Check if filename ends with _0.ext or has no _N before extension
+                  # Pattern: username_YYYY-MM-DD_HH-MM-SS.ext (no sequence) or username_..._0.ext
+                  if [[ "$fname" =~ _[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}\.(ts|mp4|mkv)$ ]] || \
+                     [[ "$fname" =~ _0\.(ts|mp4|mkv)$ ]]; then
+                    echo "Skipping active recording file (goondvr running, no/zero sequence): $fname" >&2
+                    continue
+                  fi
+                fi
+                
+                # CRITICAL FIX: Check if file is currently being written to
+                # Use both lsof and fuser for maximum reliability
                 if lsof "$f" 2>/dev/null | grep -q . || fuser "$f" 2>/dev/null | grep -q .; then
+                  echo "File is open, skipping: $(basename "$f")" >&2
                   continue
                 fi
+                
+                # CRITICAL FIX: Extended stability check - wait 60 seconds total
+                # First check: wait 30s and verify size hasn't changed
                 local s1 s2
                 s1=$(stat -c%s "$f" 2>/dev/null || echo 0)
-                sleep 10
+                sleep 30
                 [ -f "$f" ] || continue
                 s2=$(stat -c%s "$f" 2>/dev/null || echo 0)
-                [ "$s1" = "$s2" ] || continue
-                # Triple-check not open after stability wait
+                if [ "$s1" != "$s2" ]; then
+                  echo "File still growing (30s check): $(basename "$f") ($s1 -> $s2 bytes)" >&2
+                  continue
+                fi
+                
+                # Second check: wait another 30s and verify again
+                sleep 30
+                [ -f "$f" ] || continue
+                local s3
+                s3=$(stat -c%s "$f" 2>/dev/null || echo 0)
+                if [ "$s2" != "$s3" ]; then
+                  echo "File still growing (60s check): $(basename "$f") ($s2 -> $s3 bytes)" >&2
+                  continue
+                fi
+                
+                # Final check: verify file is not open after stability wait
                 if lsof "$f" 2>/dev/null | grep -q . || fuser "$f" 2>/dev/null | grep -q .; then
+                  echo "File opened during stability check, skipping: $(basename "$f")" >&2
                   continue
                 fi
                 

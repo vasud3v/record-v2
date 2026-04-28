@@ -163,7 +163,7 @@ func (ch *Channel) Monitor(runID uint64) {
 		if err = retry.Do(
 			pipeline,
 			retry.Context(ctx),
-			retry.Attempts(1000), // Cap at 1000 attempts to prevent infinite loops
+			retry.Attempts(0), // 0 = unlimited attempts - monitor should run indefinitely
 			retry.DelayType(delayFn),
 			retry.OnRetry(onRetry),
 		); err != nil {
