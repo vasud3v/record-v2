@@ -401,9 +401,12 @@ func (ch *Channel) handleSegmentForMonitor(runID uint64, b []byte, duration floa
 		minutes := int(ch.Duration) / 60
 		reportInterval := 5 // Report every 5 minutes
 		
-		if minutes > 0 && minutes%reportInterval == 0 && minutes > ch.lastReportedProgress {
+		// Report when we cross a 5-minute boundary (not just at exact multiples)
+		// This ensures we report at 5:xx, 10:xx, 15:xx, etc. even if we don't hit the exact second
+		currentBoundary := (minutes / reportInterval) * reportInterval
+		if minutes >= reportInterval && currentBoundary > ch.lastReportedProgress {
 			ch.Info("—— Recording Active | Duration: %s | Current File: %s", formattedDuration, formattedFilesize)
-			ch.lastReportedProgress = minutes
+			ch.lastReportedProgress = currentBoundary
 		}
 	} else {
 		ch.Verbose("duration: %s, filesize: %s", formattedDuration, formattedFilesize)
