@@ -43,6 +43,26 @@ Example dashboard and settings views from the current web UI.
 
 Go to the [📦 Releases page](https://github.com/HeapOfChaos/goondvr/releases) and download the appropriate binary. (e.g., `windows_amd64_goondvr.exe`)
 
+## 🔧 First Time Setup (For Forks/Clones)
+
+After cloning or forking this repository:
+
+1. **Create your channels file** (if using text file method):
+   ```bash
+   # Linux/macOS
+   cp channels.txt.example channels.txt
+   
+   # Windows (PowerShell)
+   Copy-Item channels.txt.example channels.txt
+   ```
+   Then edit `channels.txt` and add your channel names (one per line).
+
+2. **The `database` folder** is already created and ready to use - it will automatically populate when recordings start.
+
+3. **Your local files are safe** - Both `channels.txt` and `database/*` are git-ignored, so syncing your fork won't overwrite your local configuration or recording data.
+
+4. **Continue with the setup below** to configure your channels via JSON (recommended) or launch the Web UI.
+
 ## 📝 Quick Setup: Add Channels via JSON (Recommended)
 
 The simplest way to add multiple channels is by creating a `channels.json` file:

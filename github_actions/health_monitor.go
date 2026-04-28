@@ -142,6 +142,10 @@ func (hm *HealthMonitor) MonitorDiskSpace(ctx context.Context, recordingDir stri
 	ticker := time.NewTicker(hm.diskCheckInterval)
 	defer ticker.Stop()
 
+	// Track last verbose log time to reduce log spam
+	lastVerboseLog := time.Now()
+	verboseLogInterval := 30 * time.Minute // Only log normal disk usage every 30 minutes
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -160,10 +164,6 @@ func (hm *HealthMonitor) MonitorDiskSpace(ctx context.Context, recordingDir stri
 			totalGB := float64(diskStats.Total) / (1024 * 1024 * 1024)
 			freeGB := float64(diskStats.Free) / (1024 * 1024 * 1024)
 
-			// Log disk usage statistics (Requirement 4.5)
-			logMsg := fmt.Sprintf("Disk usage check: %.2f GB used, %.2f GB free of %.2f GB total (%.1f%%) on %s",
-				usageGB, freeGB, totalGB, diskStats.Percent, diskStats.Path)
-
 			// Take action based on FREE SPACE thresholds (not used space)
 			// GitHub Actions runners typically have ~14 GB free space
 			const threshold3GBFree = 3 * 1024 * 1024 * 1024  // 3 GB free - critical
@@ -172,7 +172,7 @@ func (hm *HealthMonitor) MonitorDiskSpace(ctx context.Context, recordingDir stri
 
 			if diskStats.Free <= threshold3GBFree {
 				// Critical: Stop oldest recording (Requirement 4.4)
-				logMsg = fmt.Sprintf("🚨 CRITICAL: Only %.2f GB free - stopping oldest recording", freeGB)
+				logMsg := fmt.Sprintf("🚨 CRITICAL: Only %.2f GB free - stopping oldest recording", freeGB)
 				fmt.Println(logMsg)
 				
 				if stopOldestRecordingFunc != nil {
@@ -189,7 +189,7 @@ func (hm *HealthMonitor) MonitorDiskSpace(ctx context.Context, recordingDir stri
 
 			} else if diskStats.Free <= threshold5GBFree {
 				// Warning: Pause new recordings (Requirement 4.3)
-				logMsg = fmt.Sprintf("⚠️ WARNING: Only %.2f GB free - pausing new recordings", freeGB)
+				logMsg := fmt.Sprintf("⚠️ WARNING: Only %.2f GB free - pausing new recordings", freeGB)
 				fmt.Println(logMsg)
 
 				// Send notification (Requirement 4.6)
@@ -198,15 +198,20 @@ func (hm *HealthMonitor) MonitorDiskSpace(ctx context.Context, recordingDir stri
 
 			} else if diskStats.Free <= threshold7GBFree {
 				// Alert: Trigger immediate upload (Requirement 4.2)
-				logMsg = fmt.Sprintf("⚠️ ALERT: Only %.2f GB free - triggering immediate upload", freeGB)
+				logMsg := fmt.Sprintf("⚠️ ALERT: Only %.2f GB free - triggering immediate upload", freeGB)
 				fmt.Println(logMsg)
 
 				// Send notification (Requirement 4.6)
 				hm.SendNotification("Disk Space Alert - Immediate Upload",
 					fmt.Sprintf("Only %.2f GB free (threshold: 7 GB). Triggering immediate upload of completed recordings.", freeGB))
 			} else {
-				// Normal operation - just log the stats
-				fmt.Println(logMsg)
+				// Normal operation - only log periodically to avoid log spam
+				if time.Since(lastVerboseLog) >= verboseLogInterval {
+					logMsg := fmt.Sprintf("Disk usage check: %.2f GB used, %.2f GB free of %.2f GB total (%.1f%%) on %s",
+						usageGB, freeGB, totalGB, diskStats.Percent, diskStats.Path)
+					fmt.Println(logMsg)
+					lastVerboseLog = time.Now()
+				}
 			}
 		}
 	}

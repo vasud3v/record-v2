@@ -907,6 +907,10 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 	// this — extractAllTrackBaseTimes returns nil on non-fMP4 (.ts) data.
 	var trackBaseTimes map[uint32]uint64
 
+	// Track when we last received a new segment to detect stale streams
+	lastSegmentTime := time.Now()
+	const staleTimeout = 90 * time.Second // If no new segments for 90s, consider stream ended
+
 	for {
 		resp, err := client.Get(ctx, p.PlaylistURL)
 		if err != nil {
@@ -1023,6 +1027,17 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 			if err := handler(resp, v.Duration); err != nil {
 				return fmt.Errorf("handler: %w", err)
 			}
+			
+			// Update last segment time when we successfully process a new segment
+			lastSegmentTime = time.Now()
+		}
+
+		// Check if playlist has gone stale (no new segments for staleTimeout duration)
+		if time.Since(lastSegmentTime) > staleTimeout {
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] playlist stale: no new segments for %v, stream likely ended\n", staleTimeout)
+			}
+			return internal.ErrChannelOffline
 		}
 
 		<-time.After(1 * time.Second)
@@ -1057,6 +1072,10 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 	var audioTimeBase uint64
 	videoBaseSet := false
 	audioBaseSet := false
+
+	// Track when we last received a new segment to detect stale streams
+	lastSegmentTime := time.Now()
+	const staleTimeout = 90 * time.Second // If no new segments for 90s, consider stream ended
 
 	for {
 		// Fetch video playlist
@@ -1300,7 +1319,17 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 					if err := handler(chunk, chunkDuration); err != nil {
 						return fmt.Errorf("handler muxed segment group: %w", err)
 					}
+					// Update last segment time when we successfully write a chunk
+					lastSegmentTime = time.Now()
 				}
+			}
+
+			// Check if playlist has gone stale (no new segments for staleTimeout duration)
+			if time.Since(lastSegmentTime) > staleTimeout {
+				if server.Config.Debug {
+					fmt.Printf("[DEBUG] muxed playlist stale: no new segments for %v, stream likely ended\n", staleTimeout)
+				}
+				return internal.ErrChannelOffline
 			}
 
 			<-time.After(1 * time.Second)
@@ -1401,6 +1430,19 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 			if err := handler(seg.data, seg.duration); err != nil {
 				return fmt.Errorf("handler muxed segment: %w", err)
 			}
+		}
+
+		// Update last segment time if we processed any new segments
+		if len(newVideoSegs) > 0 || len(newAudioSegs) > 0 {
+			lastSegmentTime = time.Now()
+		}
+
+		// Check if playlist has gone stale (no new segments for staleTimeout duration)
+		if time.Since(lastSegmentTime) > staleTimeout {
+			if server.Config.Debug {
+				fmt.Printf("[DEBUG] muxed playlist stale: no new segments for %v, stream likely ended\n", staleTimeout)
+			}
+			return internal.ErrChannelOffline
 		}
 
 		<-time.After(1 * time.Second)

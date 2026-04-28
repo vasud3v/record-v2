@@ -3,5 +3,7 @@ goondvr
 conf
 bin
 .env
-database
+database/*
+!database/.gitkeep
+!database/README.md
 channels.txt
