@@ -910,9 +910,10 @@ func (p *Playlist) watchVideoOnlySegments(ctx context.Context, handler WatchHand
 	// Track when we last received a new segment to detect stale streams
 	lastSegmentTime := time.Now()
 	// Use longer timeout in GitHub Actions to account for network variability
-	staleTimeout := 30 * time.Minute
+	// CRITICAL: Set to 60 minutes to prevent premature stops during slow streams
+	staleTimeout := 60 * time.Minute
 	if os.Getenv("GITHUB_ACTIONS") == "true" {
-		staleTimeout = 30 * time.Minute // 3 minutes for GitHub Actions
+		staleTimeout = 60 * time.Minute // 60 minutes for GitHub Actions
 	}
 
 	for {
