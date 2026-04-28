@@ -1162,11 +1162,30 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 		staleTimeout = 10 * time.Minute // 10 minutes for debugging
 	}
 
+	fmt.Printf("[DEBUG-RECORDING] Starting watchMuxedSegments - staleTimeout=%v\n", staleTimeout)
+	videoSegmentCount := 0
+	audioSegmentCount := 0
+	loopCount := 0
+	lastPlaylistPoll := time.Now()
+
 	for {
+		loopCount++
+		now := time.Now()
+		
+		// Log every 30 seconds to catch issues faster
+		if loopCount%30 == 0 || now.Sub(lastPlaylistPoll) > 30*time.Second {
+			fmt.Printf("[DEBUG-RECORDING] MUXED Loop %d - lastVideoSeq=%d, lastAudioSeq=%d, videoSegs=%d, audioSegs=%d, time since last segment=%v\n",
+				loopCount, lastVideoSeq, lastAudioSeq, videoSegmentCount, audioSegmentCount, time.Since(lastSegmentTime))
+		}
+
+		lastPlaylistPoll = now
+		
 		// Fetch video playlist
 		videoResp, err := client.Get(ctx, p.PlaylistURL)
 		if err != nil {
+			fmt.Printf("[DEBUG-RECORDING] MUXED: Video playlist fetch error (attempt %d/5): %v\n", consecutiveErrors+1, err)
 			if consecutiveErrors++; consecutiveErrors >= 5 {
+				fmt.Printf("[DEBUG-RECORDING] MUXED EXITING: Too many video playlist errors (%d)\n", consecutiveErrors)
 				return fmt.Errorf("get video playlist: %w", err)
 			}
 			<-time.After(2 * time.Second)
@@ -1175,10 +1194,12 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 		
 		vpl, _, err := safeDecodeFrom(strings.NewReader(normalizeM3U8(decodeMouflon(videoResp, p.MouflonPDKey))))
 		if err != nil {
+			fmt.Printf("[DEBUG-RECORDING] MUXED: Video playlist decode error (attempt %d/5): %v\n", consecutiveErrors+1, err)
 			if server.Config.Debug {
 				fmt.Printf("[DEBUG] muxed: video playlist parse failed: %v\n", err)
 			}
 			if consecutiveErrors++; consecutiveErrors >= 5 {
+				fmt.Printf("[DEBUG-RECORDING] MUXED EXITING: Too many video decode errors (%d)\n", consecutiveErrors)
 				return fmt.Errorf("decode video playlist: %w", err)
 			}
 			<-time.After(2 * time.Second)
@@ -1186,13 +1207,16 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 		}
 		videoPlaylist, ok := vpl.(*m3u8.MediaPlaylist)
 		if !ok {
+			fmt.Printf("[DEBUG-RECORDING] MUXED EXITING: Failed to cast video playlist\n")
 			return fmt.Errorf("cast video playlist to media playlist")
 		}
 
 		// Fetch audio playlist
 		audioResp, err := client.Get(ctx, p.AudioPlaylistURL)
 		if err != nil {
+			fmt.Printf("[DEBUG-RECORDING] MUXED: Audio playlist fetch error (attempt %d/5): %v\n", consecutiveErrors+1, err)
 			if consecutiveErrors++; consecutiveErrors >= 5 {
+				fmt.Printf("[DEBUG-RECORDING] MUXED EXITING: Too many audio playlist errors (%d)\n", consecutiveErrors)
 				return fmt.Errorf("get audio playlist: %w", err)
 			}
 			<-time.After(2 * time.Second)
@@ -1274,6 +1298,23 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 			duration float64
 		}
 		var newVideoSegs []segInfo
+		
+		// Count available video segments for debugging
+		var videoSegmentCount int
+		var videoAvailableSeqs []int
+		for _, v := range videoPlaylist.Segments {
+			if v != nil {
+				videoSegmentCount++
+				seq := internal.SegmentSeq(v.URI)
+				if seq == -1 && v.SeqId > 0 {
+					seq = int(v.SeqId)
+				}
+				if seq != -1 {
+					videoAvailableSeqs = append(videoAvailableSeqs, seq)
+				}
+			}
+		}
+		
 		for _, v := range videoPlaylist.Segments {
 			if v == nil {
 				continue
@@ -1298,7 +1339,25 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 				duration: v.Duration,
 			})
 		}
+		
 		var newAudioSegs []segInfo
+		
+		// Count available audio segments for debugging
+		var audioSegmentCount int
+		var audioAvailableSeqs []int
+		for _, v := range audioPlaylist.Segments {
+			if v != nil {
+				audioSegmentCount++
+				seq := internal.SegmentSeq(v.URI)
+				if seq == -1 && v.SeqId > 0 {
+					seq = int(v.SeqId)
+				}
+				if seq != -1 {
+					audioAvailableSeqs = append(audioAvailableSeqs, seq)
+				}
+			}
+		}
+		
 		for _, v := range audioPlaylist.Segments {
 			if v == nil {
 				continue
@@ -1324,8 +1383,23 @@ func (p *Playlist) watchMuxedSegments(ctx context.Context, handler WatchHandler)
 			})
 		}
 
+		// Log playlist info every 10 iterations (10 seconds)
+		if loopCount%10 == 0 {
+			fmt.Printf("[DEBUG-RECORDING] MUXED Playlists: video(mediaSeq=%d, segments=%d, lastProcessed=%d, available=%v) audio(mediaSeq=%d, segments=%d, lastProcessed=%d, available=%v)\n",
+				videoPlaylist.SeqNo, videoSegmentCount, lastVideoSeq, videoAvailableSeqs,
+				audioPlaylist.SeqNo, audioSegmentCount, lastAudioSeq, audioAvailableSeqs)
+		}
+
 		if server.Config.Debug {
 			fmt.Printf("[DEBUG] muxed: cycle video=%d audio=%d\n", len(newVideoSegs), len(newAudioSegs))
+		}
+
+		// Log new segments found
+		if len(newVideoSegs) > 0 || len(newAudioSegs) > 0 {
+			fmt.Printf("[DEBUG-RECORDING] MUXED: Found %d new video segments, %d new audio segments\n", 
+				len(newVideoSegs), len(newAudioSegs))
+		} else if loopCount%30 == 0 {
+			fmt.Printf("[DEBUG-RECORDING] MUXED: No new segments found in last 30 iterations (30 seconds)\n")
 		}
 
 		isStripchatMux := strings.Contains(p.PlaylistURL, "doppiocdn") || strings.Contains(p.AudioPlaylistURL, "doppiocdn")
