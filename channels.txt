@@ -1,0 +1,6 @@
+# Add your channels here, one per line.
+# Format: site:username
+# Lines starting with # are ignored.
+
+chaturbate:example1
+stripchat:example2

@@ -47,19 +47,11 @@ Go to the [📦 Releases page](https://github.com/HeapOfChaos/goondvr/releases) 
 
 After cloning or forking this repository:
 
-1. **Create your channels file** (if using text file method):
-   ```bash
-   # Linux/macOS
-   cp channels.txt.example channels.txt
-   
-   # Windows (PowerShell)
-   Copy-Item channels.txt.example channels.txt
-   ```
-   Then edit `channels.txt` and add your channel names (one per line).
+1. **Edit the channels file** - The repository includes `channels.txt` with example channels. Simply edit it and replace with your own channels (one per line).
 
 2. **The `database` folder** is already created and ready to use - it will automatically populate when recordings start.
 
-3. **Your local files are safe** - Both `channels.txt` and `database/*` are git-ignored, so syncing your fork won't overwrite your local configuration or recording data.
+3. **Your local files are safe** - The `database/*` contents are git-ignored, so syncing your fork won't overwrite your recording data. However, `channels.txt` IS tracked, so you may want to keep your channel list in a separate file or be careful when syncing.
 
 4. **Continue with the setup below** to configure your channels via JSON (recommended) or launch the Web UI.
 

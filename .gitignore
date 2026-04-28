@@ -6,4 +6,3 @@ bin
 database/*
 !database/.gitkeep
 !database/README.md
-channels.txt
